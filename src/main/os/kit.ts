@@ -9,6 +9,17 @@ export interface L2tpDriver {
   disconnect(): Promise<void>;
 }
 
+export interface SystemDnsBackup {
+  applied: string[];
+  services: Record<string, string[]>;
+}
+
+export interface SystemDnsResult {
+  backup: SystemDnsBackup | null;
+  configured: number;
+  failed: number;
+}
+
 // What connecting needs from the system the engines run on.
 export interface SystemKit {
   os: Os;
@@ -19,6 +30,9 @@ export interface SystemKit {
   openvpnPrepare?(binDir: string, log: LogFn): Promise<boolean>;
   // The tunnel's resolvers; Linux leaves DNS to the system unless told.
   openvpnUp(dns: string[]): Promise<void>;
+  // macOS needs the system's network services pointed at the tunnel DNS explicitly.
+  applyDns?(dns: string[]): Promise<SystemDnsResult>;
+  restoreDns?(backup: SystemDnsBackup | null): Promise<void>;
   l2tp: L2tpDriver | null;
   applyZone(iana: string): Promise<string | null>;
   restoreZone(previous: string | null): Promise<void>;

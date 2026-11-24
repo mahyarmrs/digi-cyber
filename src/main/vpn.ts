@@ -12,7 +12,7 @@ import { dnsServers, proxyOutboundFor, serverNames, xrayConfig } from './configs
 import { EngineProcess, waitForLine } from './engines/process';
 import { freePort, probeThroughProxy, waitForPort } from './health';
 import type { LogFn } from './log';
-import type { L2tpDriver, SystemKit } from './os/kit';
+import type { L2tpDriver, SystemDnsBackup, SystemKit } from './os/kit';
 import { resolveNames } from './resolve';
 import { removeTunnel, WireguardWindowsConnection, wireguardTools } from './wireguardWindows';
 
@@ -35,6 +35,28 @@ function writePrivate(file: string, content: string): void {
   fs.writeFileSync(file, content, { mode: 0o600 });
 }
 
+async function applySystemDns(kit: SystemKit, dns: string[], log: LogFn): Promise<SystemDnsBackup | null> {
+  if (!kit.applyDns) return null;
+  try {
+    const result = await kit.applyDns(dns);
+    if (result.configured > 0) log('vpn', `system DNS configured on ${result.configured} network service(s)`);
+    if (result.failed > 0) log('vpn', `could not configure DNS on ${result.failed} network service(s)`);
+    return result.backup;
+  } catch (err) {
+    log('vpn', `setting system DNS failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+async function restoreSystemDns(kit: SystemKit, backup: SystemDnsBackup | null, log: LogFn): Promise<void> {
+  if (!kit.restoreDns) return;
+  try {
+    await kit.restoreDns(backup);
+  } catch (err) {
+    log('vpn', `restoring system DNS failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 // An engine's output goes to the session log under its name, and its exit is noted there.
 function logged(proc: EngineProcess, log: LogFn): EngineProcess {
   proc.on('line', (line: string) => log(proc.name, line));
@@ -46,6 +68,7 @@ class XrayConnection implements Connection {
   readonly engine = 'xray' as const;
   private xray: EngineProcess | null = null;
   private tun: EngineProcess | null = null;
+  private dnsBackup: SystemDnsBackup | null = null;
   private lost: ((blocking: boolean) => void) | null = null;
 
   constructor(
@@ -88,7 +111,7 @@ class XrayConnection implements Connection {
     }
     const started = Date.now();
     if (!(await probeThroughProxy(httpPort, 12_000))) {
-      this.log('vpn', `no answer through this config (test page https://www.gstatic.com/generate_204, ${Date.now() - started} ms)`);
+      this.log('vpn', `no answer through this config (test page http://google.com/generate_204, ${Date.now() - started} ms)`);
       await this.stop();
       return false;
     }
@@ -117,22 +140,25 @@ class XrayConnection implements Connection {
       await this.stop();
       return false;
     }
+    this.dnsBackup = await applySystemDns(this.kit, dns, this.log);
     xray.on('exit', ({ expected }: { expected: boolean }) => {
       if (expected) return;
-      // With the kill switch the tunnel stays up with nothing behind it, so nothing leaks.
+      // With the kill switch the tunnel and its DNS stay up with nothing behind them, so nothing leaks.
       const blocking = this.settings.killSwitch && tun.alive;
-      if (!blocking) void tun.stop();
+      if (!blocking) void this.stop();
       this.lost?.(blocking);
     });
     tun.on('exit', ({ expected }: { expected: boolean }) => {
       if (expected) return;
-      void xray.stop();
+      void this.stop();
       this.lost?.(false);
     });
     return true;
   }
 
   async stop(): Promise<void> {
+    await restoreSystemDns(this.kit, this.dnsBackup, this.log);
+    this.dnsBackup = null;
     await this.tun?.stop();
     await this.xray?.stop();
   }
@@ -146,6 +172,7 @@ class OpenvpnConnection implements Connection {
   private proc: EngineProcess | null = null;
   private managementPort = 0;
   private udp = true;
+  private dnsBackup: SystemDnsBackup | null = null;
   address: string | undefined;
   private lost: ((blocking: boolean) => void) | null = null;
 
@@ -188,9 +215,14 @@ class OpenvpnConnection implements Connection {
       up = await this.run(exe, profileFile, true);
     }
     if (!up.ok) return false;
-    await this.kit.openvpnUp(dnsServers(this.settings.dns));
+    const dns = dnsServers(this.settings.dns);
+    await this.kit.openvpnUp(dns);
+    this.dnsBackup = await applySystemDns(this.kit, dns, this.log);
     this.proc?.on('exit', ({ expected }: { expected: boolean }) => {
-      if (!expected) this.lost?.(false);
+      if (!expected) {
+        void restoreSystemDns(this.kit, this.dnsBackup, this.log).finally(() => (this.dnsBackup = null));
+        this.lost?.(false);
+      }
     });
     return true;
   }
@@ -226,20 +258,23 @@ class OpenvpnConnection implements Connection {
 
   async stop(): Promise<void> {
     const proc = this.proc;
-    if (!proc?.alive) return;
-    proc.expectExit();
-    // SIGTERM through the management port lets OpenVPN tell the server it is leaving and take its
-    // routes down itself. It has to be given the time: killing it at once (on Windows a kill ends the
-    // process outright) left the server holding the session, and the account's seat, for two minutes.
-    await new Promise<void>((resolve) => {
-      // Sent is enough; the process's exit, awaited below, is what says OpenVPN is done.
-      const socket = net.connect({ host: '127.0.0.1', port: this.managementPort }, () => socket.end('signal SIGTERM\r\n', () => resolve()));
-      socket.on('error', () => resolve());
-      socket.on('close', () => resolve());
-      setTimeout(resolve, 2000);
-    });
-    if (!(await proc.exited(openvpnExitGraceMs))) this.log('vpn', `OpenVPN had not exited ${openvpnExitGraceMs / 1000} s after SIGTERM; stopping it`);
-    await proc.stop(8000);
+    if (proc?.alive) {
+      proc.expectExit();
+      // SIGTERM through the management port lets OpenVPN tell the server it is leaving and take its
+      // routes down itself. It has to be given the time: killing it at once (on Windows a kill ends the
+      // process outright) left the server holding the session, and the account's seat, for two minutes.
+      await new Promise<void>((resolve) => {
+        // Sent is enough; the process's exit, awaited below, is what says OpenVPN is done.
+        const socket = net.connect({ host: '127.0.0.1', port: this.managementPort }, () => socket.end('signal SIGTERM\r\n', () => resolve()));
+        socket.on('error', () => resolve());
+        socket.on('close', () => resolve());
+        setTimeout(resolve, 2000);
+      });
+      if (!(await proc.exited(openvpnExitGraceMs))) this.log('vpn', `OpenVPN had not exited ${openvpnExitGraceMs / 1000} s after SIGTERM; stopping it`);
+      await proc.stop(8000);
+    }
+    await restoreSystemDns(this.kit, this.dnsBackup, this.log);
+    this.dnsBackup = null;
   }
 }
 

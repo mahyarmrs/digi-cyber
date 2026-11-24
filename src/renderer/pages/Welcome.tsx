@@ -12,12 +12,14 @@ interface Props {
   reason: string;
   // From a digicyber:// link: it signs in at once.
   code: SignInCode | null;
+  addingAccount?: boolean;
   onLanguage: (language: Language) => void;
   onSignedIn: (profile: AppProfile) => void;
+  onCancel?: () => void;
 }
 
-// Signed out: the brand on one side, the one field that signs in on the other.
-export function Welcome({ t, settings, reason, code, onLanguage, onSignedIn }: Props) {
+// The brand on one side, the one field that signs in on the other.
+export function Welcome({ t, settings, reason, code, addingAccount = false, onLanguage, onSignedIn, onCancel }: Props) {
   const [subLink, setSubLink] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(reason ? errorText(t, reason) : '');
@@ -66,6 +68,7 @@ export function Welcome({ t, settings, reason, code, onLanguage, onSignedIn }: P
       </section>
       <section className="welcome-form-side">
         <div className="welcome-top">
+          {addingAccount && onCancel && <button type="button" className="btn btn-line btn-small" onClick={onCancel}>{t('cancel')}</button>}
           <Segmented
             label={t('language')}
             value={settings.language}
@@ -77,8 +80,8 @@ export function Welcome({ t, settings, reason, code, onLanguage, onSignedIn }: P
           />
         </div>
         <form className="welcome-form" onSubmit={submit}>
-          <h1>{t('signInTitle')}</h1>
-          <p>{t('signInIntro')}</p>
+          <h1>{addingAccount ? t('addAccount') : t('signInTitle')}</h1>
+          <p>{addingAccount ? t('addAccountIntro') : t('signInIntro')}</p>
           <label className="label">
             <span>{t('subLink')}</span>
             <input className="field" dir="ltr" value={subLink} onChange={(e) => change(e.target.value)} placeholder="https://…/sub/…" required autoFocus spellCheck={false} />

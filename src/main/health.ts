@@ -1,5 +1,6 @@
 import net from 'node:net';
-import tls from 'node:tls';
+
+export const connectivityTestUrl = 'http://google.com/generate_204';
 
 export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -35,68 +36,100 @@ export async function waitForPort(port: number, timeoutMs: number, alive: () => 
   return false;
 }
 
-// Fetches the same empty page with the system's own routes and resolver, for a tunnel that carries
-// the whole system (WireGuard's tunnel service). Tries again until the deadline, since routes and
-// DNS settle a moment after the tunnel comes up.
-export async function probeDirect(timeoutMs = 10_000, host = 'www.gstatic.com'): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const left = deadline - Date.now();
-    const ok = await new Promise<boolean>((resolve) => {
-      let settled = false;
-      const finish = (result: boolean) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        secure.destroy();
-        resolve(result);
-      };
-      const timer = setTimeout(() => finish(false), left);
-      const secure = tls.connect({ host, port: 443, servername: host });
-      secure.once('error', () => finish(false));
-      secure.once('secureConnect', () => secure.write(`GET /generate_204 HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
-      let reply = '';
-      secure.on('data', (d: Buffer) => {
-        reply += d.toString('latin1');
-        if (reply.includes('\r\n')) finish(/^HTTP\/1\.[01] 204/.test(reply));
-      });
-    });
-    if (ok) return true;
-    if (deadline - Date.now() > 500) await new Promise((r) => setTimeout(r, 500));
-  }
-  return false;
+function requestPath(url: URL): string {
+  return `${url.pathname || '/'}${url.search}`;
 }
 
-// Fetches an empty page through the HTTP proxy inbound: the config works only if this answers.
-export function probeThroughProxy(httpPort: number, timeoutMs = 10_000, host = 'www.gstatic.com'): Promise<boolean> {
+function is204(line: string): boolean {
+  return /^HTTP\/1\.[01] 204(?:\s|$)/i.test(line);
+}
+
+function elapsedMs(started: number): number {
+  return Math.max(1, Math.round(performance.now() - started));
+}
+
+// Requests the Google generate_204 page using the system route and DNS. Used to verify a tunnel
+// that carries the whole system, and to measure the currently active non-Xray tunnel.
+export function pingDirect(timeoutMs = 10_000, testUrl = connectivityTestUrl): Promise<number | null> {
+  let url: URL;
+  try {
+    url = new URL(testUrl);
+  } catch {
+    return Promise.resolve(null);
+  }
+  if (url.protocol !== 'http:' || !url.hostname) return Promise.resolve(null);
+
   return new Promise((resolve) => {
+    const started = performance.now();
     let settled = false;
-    const finish = (ok: boolean) => {
+    const socket = net.connect({ host: url.hostname, port: Number(url.port) || 80 });
+    const finish = (ms: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      resolve(ok);
+      resolve(ms);
     };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    const socket = net.connect({ host: '127.0.0.1', port: httpPort });
-    socket.once('error', () => finish(false));
-    socket.once('connect', () => socket.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}:443\r\n\r\n`));
-    let head = '';
-    const onData = (chunk: Buffer) => {
-      head += chunk.toString('latin1');
-      if (!head.includes('\r\n\r\n')) return;
-      socket.off('data', onData);
-      if (!/^HTTP\/1\.[01] 200/.test(head)) return finish(false);
-      const secure = tls.connect({ socket, servername: host });
-      secure.once('error', () => finish(false));
-      secure.once('secureConnect', () => secure.write(`GET /generate_204 HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`));
-      let reply = '';
-      secure.on('data', (d: Buffer) => {
-        reply += d.toString('latin1');
-        if (reply.includes('\r\n')) finish(/^HTTP\/1\.[01] 204/.test(reply));
-      });
-    };
-    socket.on('data', onData);
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    socket.once('error', () => finish(null));
+    socket.once('connect', () => {
+      socket.write(`GET ${requestPath(url)} HTTP/1.1\r\nHost: ${url.host}\r\nConnection: close\r\n\r\n`);
+    });
+    let reply = '';
+    socket.on('data', (chunk: Buffer) => {
+      reply += chunk.toString('latin1');
+      const end = reply.indexOf('\r\n');
+      if (end >= 0) finish(is204(reply.slice(0, end)) ? elapsedMs(started) : null);
+    });
   });
+}
+
+// Tries again while a tunnel's routes and DNS settle; its actual RTT is measured elsewhere.
+export async function probeDirect(timeoutMs = 10_000, host = 'google.com'): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await pingDirect(deadline - Date.now(), `http://${host}/generate_204`)) !== null) return true;
+    if (deadline - Date.now() > 300) await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return false;
+}
+
+// Requests the Google endpoint through a local HTTP proxy and returns that request's round trip.
+export function pingThroughProxy(httpPort: number, timeoutMs = 10_000, testUrl = connectivityTestUrl): Promise<number | null> {
+  let url: URL;
+  try {
+    url = new URL(testUrl);
+  } catch {
+    return Promise.resolve(null);
+  }
+  if (url.protocol !== 'http:' || !url.hostname) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    const started = performance.now();
+    let settled = false;
+    const socket = net.connect({ host: '127.0.0.1', port: httpPort });
+    const finish = (ms: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(ms);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    socket.once('error', () => finish(null));
+    socket.once('connect', () => {
+      // An HTTP proxy receives an absolute-form URL; unlike HTTPS, this needs no CONNECT or TLS.
+      socket.write(`GET ${url.href} HTTP/1.1\r\nHost: ${url.host}\r\nConnection: close\r\n\r\n`);
+    });
+    let reply = '';
+    socket.on('data', (chunk: Buffer) => {
+      reply += chunk.toString('latin1');
+      const end = reply.indexOf('\r\n');
+      if (end >= 0) finish(is204(reply.slice(0, end)) ? elapsedMs(started) : null);
+    });
+  });
+}
+
+export async function probeThroughProxy(httpPort: number, timeoutMs = 10_000): Promise<boolean> {
+  return (await pingThroughProxy(httpPort, timeoutMs)) !== null;
 }

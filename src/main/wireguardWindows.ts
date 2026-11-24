@@ -161,7 +161,7 @@ export class WireguardWindowsConnection {
     const ok = await probeDirect(probeMs);
     if (this.stopped) return 'stopped';
     if (!ok) {
-      this.log('vpn', `no answer through this config (test page https://www.gstatic.com/generate_204, ${Date.now() - probeStarted} ms)`);
+      this.log('vpn', `no answer through this config (test page http://google.com/generate_204, ${Date.now() - probeStarted} ms)`);
       await this.fail();
       return 'answer';
     }

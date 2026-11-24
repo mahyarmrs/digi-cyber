@@ -12,8 +12,10 @@ async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
 const api: DcApi = {
   os: osOf(process.platform),
   session: () => invoke('session'),
+  accounts: () => invoke('accounts'),
   login: (subLink, username) => invoke('login', subLink, username ?? ''),
-  logout: () => invoke('logout'),
+  switchAccount: (id) => invoke('switchAccount', id),
+  logout: (id) => (id ? invoke('logout', id) : invoke('logout')),
   profile: (refresh) => invoke('profile', refresh),
   refresh: () => invoke('refresh'),
   settings: () => invoke('settings'),

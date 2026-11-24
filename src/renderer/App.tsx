@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 
 import { bannerNotices, noticeLog, unreadNotices } from '../shared/notices';
 import type { SignInCode } from '../shared/signin';
-import type { Activity, AppProfile, PingResult, ProfileUpdate, Settings, Status } from '../shared/types';
+import type { AccountSummary, Activity, AppProfile, PingResult, ProfileUpdate, Settings, Status } from '../shared/types';
 import { BellIcon, ChartIcon, GearIcon, GlobeIcon, HelpIcon, HomeIcon, RefreshIcon } from './components/Icons';
 import { Wordmark } from './components/Mark';
 import { NoticeDrawer, NoticeStrips, Toast } from './components/Notices';
-import { translator } from './i18n';
+import { errorText, translator } from './i18n';
 import { Home } from './pages/Home';
 import { Locations } from './pages/Locations';
 import { Servers } from './pages/Servers';
@@ -30,7 +30,10 @@ function useSystemDark(): boolean {
 export function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [profile, setProfile] = useState<AppProfile | null>(null);
+  const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
+  const [addingAccount, setAddingAccount] = useState(false);
+  const [switchingAccount, setSwitchingAccount] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>({ state: 'disconnected' });
   const [pings, setPings] = useState<PingResult[]>([]);
   const [activity, setActivity] = useState<Activity>({ days: {}, recents: [] });
@@ -73,18 +76,28 @@ export function App() {
     toastTimer.current = setTimeout(() => setToast(null), 3500);
   }, []);
 
+  const loadAccounts = useCallback(async () => {
+    try {
+      setAccounts(await window.dc.accounts());
+    } catch {
+      // The account list stays as last seen.
+    }
+  }, []);
+
   const signedOut = useCallback((code: string) => {
     setProfile(null);
     setSignedIn(false);
     setSignOutReason(code);
-  }, []);
+    void loadAccounts();
+  }, [loadAccounts]);
 
   const applyUpdate = useCallback((update: ProfileUpdate | null) => {
     if (!update) return;
     setProfile(update.profile);
     setSignedIn(true);
     setFetchedAt(update.fetchedAt);
-  }, []);
+    void loadAccounts();
+  }, [loadAccounts]);
 
   // A fetch from the panel now; the main process also does this every 10 minutes by itself.
   const refreshNow = useCallback(
@@ -119,6 +132,7 @@ export function App() {
     void window.dc.settings().then(setSettings);
     void window.dc.status().then(setStatus);
     void window.dc.activity().then(setActivity);
+    void loadAccounts();
     void window.dc.session().then((s) => {
       if (!s) {
         setSignedIn(false);
@@ -137,9 +151,9 @@ export function App() {
       offProfile();
       offSignedOut();
     };
-  }, [loadProfile, applyUpdate, signedOut]);
+  }, [loadProfile, applyUpdate, signedOut, loadAccounts]);
 
-  // A digicyber:// link the app was opened with: signed out it signs in; signed in to another subscription, it asks first.
+  // A digicyber:// link adds its account without discarding the one already signed in.
   useEffect(() => {
     if (signedIn === null || !settings) return;
     const take = async () => {
@@ -147,17 +161,15 @@ export function App() {
       if (!code) return;
       if (signedIn) {
         const session = await window.dc.session();
-        if (session && session.subLink.trim() === code.subLink) return;
-        if (!window.confirm(translator(settings.language)('switchAccount', { user: session?.username ?? '' }))) return;
-        await window.dc.disconnect();
-        await window.dc.logout();
-        signedOut('');
+        if (session && session.subLink.trim() === code.subLink.trim() && (!code.username || session.username === code.username)) return;
+        if (!window.confirm(translator(settings.language)('switchAccount'))) return;
+        setAddingAccount(true);
       }
       setSignInCode(code);
     };
     void take();
     return window.dc.onSignInLink(() => void take());
-  }, [signedIn, settings, signedOut]);
+  }, [signedIn, settings]);
 
   useEffect(() => {
     if (!signedIn) return;
@@ -175,25 +187,76 @@ export function App() {
 
   if (!settings || signedIn === null) return <div className="splash" />;
 
-  if (!signedIn || !profile) {
+  const completeSignIn = (p: AppProfile) => {
+    setSignInCode(null);
+    setAddingAccount(false);
+    setProfile(p);
+    setSignedIn(true);
+    setSignOutReason('');
+    setFetchedAt(Date.now());
+    setPage('home');
+    void loadAccounts();
+    void window.dc.status().then(setStatus);
+    void window.dc.settings().then(setSettings);
+  };
+  const cancelAddAccount = () => {
+    setSignInCode(null);
+    setAddingAccount(false);
+  };
+
+  if (addingAccount || !signedIn || !profile) {
     return (
       <Welcome
         t={t}
         settings={settings}
         reason={signOutReason}
         code={signInCode}
+        addingAccount={addingAccount}
         onLanguage={(language) => void saveSettings({ language })}
-        onSignedIn={(p) => {
-          setSignInCode(null);
-          setProfile(p);
-          setSignedIn(true);
-          setSignOutReason('');
-          setFetchedAt(Date.now());
-          setPage('home');
-        }}
+        onSignedIn={completeSignIn}
+        onCancel={addingAccount ? cancelAddAccount : undefined}
       />
     );
   }
+
+  const switchToAccount = async (id: string) => {
+    setSwitchingAccount(id);
+    try {
+      const next = await window.dc.switchAccount(id);
+      setProfile(next);
+      setSignedIn(next !== null);
+      setSignOutReason(next ? '' : 'bad_session');
+      setPings([]);
+      if (next) setFetchedAt(Date.now());
+      setSettings(await window.dc.settings());
+      setStatus(await window.dc.status());
+      await loadAccounts();
+      if (next) setPage('home');
+    } catch (err) {
+      showToast(errorText(t, (err as Error).message), 'bad');
+    } finally {
+      setSwitchingAccount(null);
+    }
+  };
+  const addAccount = () => {
+    setSignInCode(null);
+    setAddingAccount(true);
+  };
+  const logoutActive = async () => {
+    try {
+      const next = await window.dc.logout();
+      setProfile(next);
+      setSignedIn(next !== null);
+      setSignOutReason('');
+      setPings([]);
+      if (next) setFetchedAt(Date.now());
+      setSettings(await window.dc.settings());
+      setStatus(await window.dc.status());
+      await loadAccounts();
+    } catch (err) {
+      showToast(errorText(t, (err as Error).message), 'bad');
+    }
+  };
 
   const connectTo = async (locationId: number | null) => {
     setSettings({ ...settings, locationId });
@@ -306,12 +369,11 @@ export function App() {
             onSection={setSection}
             onChange={(patch) => void saveSettings(patch)}
             onRefresh={() => void refreshNow(true)}
-            onLogout={() =>
-              void window.dc.logout().then(() => {
-                setProfile(null);
-                setSignedIn(false);
-              })
-            }
+            accounts={accounts}
+            switchingAccount={switchingAccount}
+            onAddAccount={addAccount}
+            onSwitchAccount={(id) => void switchToAccount(id)}
+            onLogout={() => void logoutActive()}
           />
         )}
       </main>
