@@ -1,0 +1,72 @@
+#!/bin/sh
+# Digi Cyber's helper: the root LaunchDaemon that runs the VPN engines for the app.
+# Anything that stops the helper from being set up fails the install, so Installer never reports
+# success for an app that cannot connect.
+LABEL=com.digicyber.client.helper
+PLIST=/Library/LaunchDaemons/$LABEL.plist
+APP="/Applications/Digi Cyber.app"
+SOCK=/var/run/digi-cyber.sock
+LOGDIR="/Library/Application Support/Digi Cyber"
+
+fail() {
+  echo "Digi Cyber: $1" >&2
+  exit 1
+}
+
+[ "$(id -u)" = 0 ] || fail "the package must be installed for all users of this Mac (as root) to set up its helper"
+[ -x "$APP/Contents/MacOS/Digi Cyber" ] || fail "$APP is missing"
+[ -f "$APP/Contents/Resources/helper/helper.js" ] || fail "the helper is missing from $APP"
+
+# 1.1.1's package could only install into the user's own Applications folder, without the helper.
+# That copy is this same app; remove it so the user opens the one that works.
+user=$(stat -f %Su /dev/console 2>/dev/null)
+if [ -n "$user" ] && [ "$user" != root ]; then
+  home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')
+  old="$home/Applications/Digi Cyber.app"
+  if [ -n "$home" ] && [ -d "$old" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$old/Contents/Info.plist" 2>/dev/null)" = com.digicyber.client ]; then
+    rm -rf "$old" && echo "Digi Cyber: removed the earlier copy in $home/Applications"
+  fi
+fi
+
+mkdir -p "$LOGDIR"
+chmod 700 "$LOGDIR"
+cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$APP/Contents/MacOS/Digi Cyber</string>
+    <string>$APP/Contents/Resources/helper/helper.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ELECTRON_RUN_AS_NODE</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>$LOGDIR/helper.log</string>
+</dict>
+</plist>
+PLISTEOF
+chown root:wheel "$PLIST" || fail "could not set up $PLIST"
+chmod 644 "$PLIST"
+
+# The helper makes a fresh socket when it starts; a stale one would look like a running helper.
+rm -f "$SOCK"
+# Clears a "disabled" mark left on the service, then loads it (the older command if bootstrap refuses).
+launchctl enable "system/$LABEL" 2>/dev/null
+launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null
+launchctl kickstart "system/$LABEL" 2>/dev/null
+
+# Loaded is enough here: launchd starts it (RunAtLoad) and keeps it running (KeepAlive).
+launchctl print "system/$LABEL" >/dev/null 2>&1 && exit 0
+tail -20 "$LOGDIR/helper.log" >&2 2>/dev/null
+fail "the helper service could not be loaded (System Settings → General → Login Items: Digi Cyber must be allowed in the background)"

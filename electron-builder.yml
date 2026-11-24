@@ -1,0 +1,118 @@
+appId: com.digicyber.client
+productName: Digi Cyber
+copyright: Copyright © Digi Cyber
+# The app has no auto-updater; without this, electron-builder writes the git remote into app-update.yml.
+publish: null
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - '!dist/smoke.js'
+  - '!dist/l2tp-check.js'
+  - '!dist/openvpn-check.js'
+  - '!dist/wireguard-check.js'
+  - '!dist/helper/**'
+  - '!dist/bin/**'
+  - package.json
+# The engines of the platform and architecture being built (scripts/fetch-binaries.mjs).
+extraResources:
+  - from: resources/bin/${os}-${arch}
+    to: bin
+    filter: ['**/*', '!.gitkeep']
+  - from: build/icon.png
+    to: icon.png
+  - from: build/tray
+    to: tray
+npmRebuild: false
+afterPack: scripts/after-pack.cjs
+# digicyber://login?sub=…&user=… links (the bot's sign-in link) open the app and sign in.
+protocols:
+  - name: Digi Cyber sign-in
+    schemes: [digicyber]
+
+win:
+  target: nsis
+  # What the app runs to add its L2TP/IPsec connection (src/main/os/windows.ts).
+  extraResources:
+    - from: build/windows/l2tp-connection.ps1
+      to: l2tp-connection.ps1
+  icon: build/icon.ico
+  requestedExecutionLevel: requireAdministrator
+  artifactName: Digi-Cyber-Setup-${version}.exe
+nsis:
+  oneClick: false
+  perMachine: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Digi Cyber
+  uninstallDisplayName: Digi Cyber
+  include: build/installer.nsh
+
+# Linux: the app runs as the user; the engines run in a root systemd service (digi-cyber-helper).
+linux:
+  target:
+    - target: deb
+      arch: [x64, arm64]
+    - target: rpm
+      arch: [x64, arm64]
+    - target: pacman
+      arch: [x64, arm64]
+  executableName: digi-cyber
+  syncDesktopName: true
+  icon: build/icons
+  category: Network
+  mimeTypes: [x-scheme-handler/digicyber]
+  synopsis: Digi Cyber, the VPN app of Digi Cyber
+  description: The VPN app of Digi Cyber. Sign in with the subscription link of your service, or the sign-in link from the bot.
+  # Debian wants an address here; .invalid (RFC 2606) is one that names no person and no domain.
+  maintainer: Digi Cyber <noreply@digicyber.invalid>
+  vendor: Digi Cyber
+  artifactName: Digi-Cyber-${version}-linux-${arch}.${ext}
+  extraResources:
+    - from: dist/helper
+      to: helper
+deb:
+  afterInstall: build/linux/after-install.sh
+  afterRemove: build/linux/after-remove.sh
+  # electron-builder's defaults plus what Electron links that a minimal system lacks (sound, GBM, CUPS) and OpenVPN.
+  # The t64 names first: Ubuntu 24.04 otherwise satisfies libasound2 with OSS's stand-in, which lacks ALSA's symbols.
+  depends: [libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0, 'libasound2t64 | libasound2', libgbm1, 'libcups2t64 | libcups2', openvpn]
+  recommends: [libappindicator3-1, network-manager-l2tp]
+rpm:
+  afterInstall: build/linux/after-install.sh
+  afterRemove: build/linux/after-remove.sh
+  depends: [gtk3, libnotify, nss, libXScrnSaver, (libXtst or libXtst6), xdg-utils, at-spi2-core, (libuuid or libuuid1), alsa-lib, mesa-libgbm, cups-libs, openvpn]
+  fpm: ['--rpm-tag', 'Recommends: NetworkManager-l2tp']
+pacman:
+  afterInstall: build/linux/after-install.sh
+  afterRemove: build/linux/after-remove.sh
+  depends: [gtk3, nss, libnotify, libxss, libxtst, xdg-utils, at-spi2-core, util-linux-libs, libsecret, alsa-lib, mesa, libcups, openvpn]
+  fpm: ['--pacman-optional-depends', 'networkmanager-l2tp: L2TP connections']
+
+# macOS: an installer package that also sets up the root LaunchDaemon (build/pkg-scripts).
+mac:
+  # The architecture comes from the command line, one per run (npm run dist:mac): two pkg builds
+  # in one run share the same intermediate component package and remove it under each other.
+  target: pkg
+  icon: build/icon.icns
+  category: public.app-category.utilities
+  identity: null
+  artifactName: Digi-Cyber-${version}-mac-${arch}.${ext}
+  minimumSystemVersion: '12.0'
+  extraResources:
+    - from: dist/helper
+      to: helper
+    - from: build/uninstall-macos.sh
+      to: uninstall.sh
+# Only a system-wide install into /Applications: the helper is a root LaunchDaemon. A home-folder
+# install ("Install for me only") runs as the user, cannot set it up, and leaves an app that cannot
+# connect.
+pkg:
+  installLocation: /Applications
+  isRelocatable: false
+  allowAnywhere: false
+  allowCurrentUserHome: false
+  allowRootDirectory: true
+  overwriteAction: upgrade

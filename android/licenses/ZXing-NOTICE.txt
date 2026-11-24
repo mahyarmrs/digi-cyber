@@ -1,0 +1,3 @@
+QR codes are read with ZXing (https://github.com/zxing/zxing) and ZXing Android Embedded
+(https://github.com/journeyapps/zxing-android-embedded), both under the Apache License 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).

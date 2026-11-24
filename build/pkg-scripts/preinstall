@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stops the helper of an installed copy so the new one replaces it.
+launchctl bootout system/com.digicyber.client.helper >/dev/null 2>&1 || true
+exit 0

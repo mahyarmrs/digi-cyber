@@ -1,0 +1,20 @@
+node_modules/
+dist/
+release/
+resources/bin/*
+!resources/bin/.gitkeep
+*.log
+android/.gradle/
+android/build/
+android/app/build/
+android/app/libs/*.aar
+android/app/src/main/jniLibs/
+android/app/src/main/assets/*.dat
+android/core/go.sum
+android/local.properties
+smoke/
+
+# Android signing key folder (scripts/make-android-key.sh); never commit it
+android-signing/
+*.jks
+*.keystore

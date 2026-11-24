@@ -1,0 +1,597 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  # A pull request with the macos label builds and tests the macOS installers too (labeled: adding it starts a run).
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      macos:
+        description: Build the macOS installers too
+        type: boolean
+        default: true
+      publish:
+        description: Publish this version's release, also when it exists already (its files are replaced)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# A newer push to the same branch replaces a run still going; a tag's run is never cancelled.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+# Releases are published on this repository, whose README is the download page. A RELEASE_REPO
+# variable sends them to another repository instead, written as a GitHub App of its owner
+# (RELEASE_APP_ID, RELEASE_APP_KEY), with the download page rendered there.
+env:
+  RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+
+jobs:
+  # A push to main (or Run workflow on main) whose package.json version has no release yet publishes
+  # it, so a release is cut by changing the version; a v* tag publishes that one; Run workflow with
+  # Publish ticked publishes the version again (to add the Android files once the signing key is set).
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.publish }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          publish=false
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+            publish=true
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$GITHUB_REF" = refs/heads/main ] && [ "$FORCE" = true ]; then
+            publish=true
+          elif [ "$GITHUB_EVENT_NAME" != pull_request ] && [ "$GITHUB_REF" = refs/heads/main ] && ! gh release view "$tag" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            publish=true
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "$tag: publish=$publish"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Fetch the engines
+        run: node scripts/fetch-binaries.mjs win x64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check the configurations the app writes with the real engines
+        shell: pwsh
+        run: |
+          node dist/smoke.js smoke
+          $bin = 'resources\bin\win-x64'
+          foreach ($f in Get-ChildItem smoke\xray-*.json) {
+            & $bin\xray.exe run -test -c $f.FullName
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          & $bin\sing-box.exe check -c smoke\tun.json
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $v = & $bin\openvpn\openvpn.exe --version 2>&1 | Out-String
+          Write-Output $v
+          if ($v -notmatch 'OpenVPN 2\.6') { exit 1 }
+      - name: Build the installer
+        run: npx electron-builder --win nsis --x64 --publish never
+      # The packaged script, run the way the app runs it; a second run must replace the first connection.
+      - name: Add the L2TP connection from the packaged script
+        shell: powershell
+        run: |
+          $res = 'release\win-unpacked\resources'
+          if (-not (Test-Path "$res\bin\xray.exe")) { Write-Output 'engines missing from the package'; exit 1 }
+          node dist/l2tp-check.js "$res\l2tp-connection.ps1"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $c = Get-VpnConnection -Name 'Digi Cyber L2TP'
+          $c | Format-List Name, ServerAddress, TunnelType, AuthenticationMethod, L2tpIPsecAuth
+          if ($c.ServerAddress -ne 'vpn.example.com' -or "$($c.TunnelType)" -ne 'L2tp') { exit 1 }
+          Remove-VpnConnection -Name 'Digi Cyber L2TP' -Force
+      # OpenVPN through the adapters the app adds itself (TAP-Windows6 and ovpn-dco), to a server on this machine.
+      - name: Connect OpenVPN the way the app does
+        shell: bash
+        env:
+          MSYS_NO_PATHCONV: '1'
+        run: |
+          ls -R release/win-unpacked/resources/bin/openvpn | head -40
+          d=$(mktemp -d)
+          (
+            cd "$d"
+            openssl ecparam -name prime256v1 -genkey -noout -out ca.key
+            openssl req -x509 -new -key ca.key -subj "/CN=Digi Cyber test CA" -days 2 -out ca.crt
+            openssl ecparam -name prime256v1 -genkey -noout -out server.key
+            openssl req -new -key server.key -subj "/CN=manifold-openvpn-server" -out server.csr
+            printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth\n' > ext.cnf
+            openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out server.crt
+          )
+          node dist/openvpn-check.js release/win-unpacked/resources "$(cygpath -w "$d")"
+      # WireGuard's tunnel service from the package, with the config the app writes (Iran direct's full list).
+      - name: Run WireGuard's tunnel service the way the app does
+        shell: pwsh
+        run: |
+          $res = 'release\win-unpacked\resources'
+          Get-Content "$res\bin\VERSIONS.txt"
+          node dist/wireguard-check.js $res
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Digi-Cyber-Windows
+          path: release/Digi-Cyber-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  linux:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # A commit made on Windows drops the executable bit, and the installers' scripts need it.
+      - name: Keep the installer scripts executable
+        run: chmod +x build/linux/*.sh build/pkg-scripts/* build/uninstall-macos.sh
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Packaging tools for rpm and pacman
+        run: sudo apt-get update && sudo apt-get install -y rpm libarchive-tools
+      - run: npm ci
+      - run: npm run build
+      - name: Fetch the engines
+        run: |
+          node scripts/fetch-binaries.mjs linux x64
+          node scripts/fetch-binaries.mjs linux arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check the configurations the app writes with the real engines
+        run: |
+          node dist/smoke.js smoke
+          bin=resources/bin/linux-x64
+          for f in smoke/xray-*.json; do $bin/xray run -test -c "$f"; done
+          $bin/sing-box check -c smoke/tun.json
+      - name: Build deb, rpm and pacman packages (x64 and arm64)
+        run: npx electron-builder --linux --x64 --arm64 --publish never
+      # The account behind this repository must not reach customers, by way of a config or of git
+      # (electron-builder falls back to the git remote when package.json has no homepage). Only the
+      # app's own files are searched (resources: app.asar, helper, icons), not Electron's or the
+      # engines' binaries, whose data holds most short names by chance (common first names
+      # included). Names shorter than four letters are too common to search for.
+      - name: No personal account in the app
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ ${#OWNER} -lt 4 ]; then echo "::notice::Owner name $OWNER is too short to check."; exit 0; fi
+          # An account named after the app itself (digicyber) is the brand, not a person.
+          if printf 'digicyber digi-cyber' | grep -q -i -F -- "$OWNER"; then echo "::notice::Owner $OWNER is the app's own name; not checked."; exit 0; fi
+          own="release/linux-unpacked/resources release/linux-arm64-unpacked/resources"
+          for d in $own; do test -f "$d/app.asar" || { echo "::error::$d/app.asar is missing"; exit 1; }; done
+          if grep -r -a -i -l -F --exclude-dir=bin "$OWNER" $own; then exit 1; fi
+          for p in release/*.deb; do if dpkg-deb -I "$p" | grep -i -F "$OWNER"; then exit 1; fi; done
+      - name: Install the deb, check the helper service answers, remove it
+        run: |
+          ls -la release
+          sudo apt-get install -y "$(ls ./release/*.deb | grep -v arm64)"
+          systemctl is-active digi-cyber-helper
+          node scripts/helper-hello.mjs /run/digi-cyber/helper.sock
+          test -x "/opt/Digi Cyber/resources/bin/xray"
+          test -f "/opt/Digi Cyber/resources/tray/tray-white-24.png"
+          grep -q 'x-scheme-handler/digicyber' /usr/share/applications/digi-cyber.desktop
+          sudo apt-get remove -y digi-cyber
+          if systemctl is-active --quiet digi-cyber-helper; then echo "helper still running"; exit 1; fi
+          test ! -e /etc/systemd/system/digi-cyber-helper.service
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Digi-Cyber-Linux
+          path: |
+            release/*.deb
+            release/*.rpm
+            release/*.pacman
+          if-no-files-found: error
+          retention-days: 3
+
+  # Each distribution's package manager resolves the package's dependencies (no systemd in a container).
+  linux-distros:
+    needs: linux
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:stable
+            install: apt-get update && apt-get install -y "$(ls ./pkg/*.deb | grep -v arm64)"
+          - image: ubuntu:24.04
+            install: apt-get update && apt-get install -y "$(ls ./pkg/*.deb | grep -v arm64)"
+          - image: fedora:latest
+            install: dnf install -y "$(ls ./pkg/*.rpm | grep -v aarch64)"
+          - image: archlinux:latest
+            install: pacman -Syu --noconfirm && pacman -U --noconfirm "$(ls ./pkg/*.pacman | grep -v -e aarch64 -e arm64)"
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Digi-Cyber-Linux
+          path: pkg
+      - run: ls pkg
+      - run: ${{ matrix.install }}
+      - run: test -x "/opt/Digi Cyber/digi-cyber" && test -f "/opt/Digi Cyber/resources/helper/helper.js" && test -f /etc/systemd/system/digi-cyber-helper.service
+      - run: ELECTRON_RUN_AS_NODE=1 "/opt/Digi Cyber/digi-cyber" -e "console.log(process.versions.node)"
+
+  macos:
+    needs: [test, version]
+    if: needs.version.outputs.publish == 'true' || (github.event_name == 'workflow_dispatch' && inputs.macos) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'macos'))
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      # A commit made on Windows drops the executable bit, and the installers' scripts need it.
+      - name: Keep the installer scripts executable
+        run: chmod +x build/linux/*.sh build/pkg-scripts/* build/uninstall-macos.sh
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Fetch the engines
+        run: |
+          node scripts/fetch-binaries.mjs mac x64
+          node scripts/fetch-binaries.mjs mac arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check the configurations the app writes with the real engines
+        run: |
+          node dist/smoke.js smoke
+          bin=resources/bin/mac-arm64
+          for f in smoke/xray-*.json; do $bin/xray run -test -c "$f"; done
+          $bin/sing-box check -c smoke/tun.json
+      # One architecture at a time: both builds would share the same intermediate component package.
+      - name: Build the installer packages (Intel and Apple silicon)
+        run: |
+          npx electron-builder --mac --x64 --publish never
+          npx electron-builder --mac --arm64 --publish never
+      # Double-clicking a package (Installer.app) offers only the domains the package allows; 1.1.1
+      # allowed only the user's home folder, where the helper (a root LaunchDaemon) cannot be set up.
+      # The command-line installer ignores the domains, so a home install from it must fail in postinstall.
+      - name: Check the packages install only system-wide
+        run: |
+          for pkg in release/*.pkg; do
+            rm -rf /tmp/pkg-expanded && pkgutil --expand "$pkg" /tmp/pkg-expanded
+            grep -o '<domains[^>]*>' /tmp/pkg-expanded/Distribution
+            test "$(installer -pkg "$pkg" -dominfo)" = LocalSystem
+          done
+          if installer -pkg release/Digi-Cyber-*-mac-arm64.pkg -target CurrentUserHomeDirectory; then
+            echo "A home-folder install succeeded" >&2
+            exit 1
+          fi
+          # Its files stay behind (Installer does not roll back); the system install below removes them.
+          ls -d "$HOME/Applications/Digi Cyber.app" || true
+      - name: Install the Apple silicon package, check the helper answers
+        run: |
+          sudo installer -pkg release/Digi-Cyber-*-mac-arm64.pkg -target /
+          codesign --verify --deep --strict "/Applications/Digi Cyber.app"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "/Applications/Digi Cyber.app/Contents/Info.plist" | grep -qx digicyber
+          sleep 3
+          sudo launchctl print system/com.digicyber.client.helper | head -20
+          node scripts/helper-hello.mjs /var/run/digi-cyber.sock
+          echo "console user: $(stat -f %Su /dev/console)"
+          if [ -e "$HOME/Applications/Digi Cyber.app" ]; then echo "home-folder copy still there"; rm -rf "$HOME/Applications/Digi Cyber.app"; else echo "home-folder copy removed by postinstall"; fi
+          sudo "/Applications/Digi Cyber.app/Contents/Resources/uninstall.sh"
+          test ! -e "/Applications/Digi Cyber.app"
+      - name: Installer and helper logs
+        if: failure()
+        run: |
+          sudo grep -E 'postinstall|preinstall|Digi Cyber|digicyber' /var/log/install.log | tail -80 || true
+          sudo cat "/Library/Application Support/Digi Cyber/helper.log" || true
+          sudo launchctl print system/com.digicyber.client.helper || true
+          ls -la /var/run/digi-cyber.sock "/Applications/Digi Cyber.app" "$HOME/Applications" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Digi-Cyber-macOS
+          path: release/*.pkg
+          if-no-files-found: error
+          retention-days: 3
+
+  android:
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14.3
+      # The desktop's Xray release with its geo files; the Android core is built from the same release.
+      - name: Xray's release and geo files
+        run: |
+          node scripts/fetch-binaries.mjs linux x64
+          cp resources/bin/linux-x64/geoip.dat resources/bin/linux-x64/geosite.dat android/app/src/main/assets/
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Xray stopped tagging Go module versions (v1.*) after March 2026, so @latest stays there: the
+      # release's commit gives the same code the desktop app runs. Its wlynxg/anet (Android network
+      # interfaces) links to net internals, which Go allows only with -checklinkname=0, as Xray's own builds do.
+      - name: Xray-core for Android (gomobile, all four processor families)
+        working-directory: android/core
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          tag=$(sed -n 's/^xray //p' "$GITHUB_WORKSPACE/resources/bin/linux-x64/VERSIONS.txt")
+          commit=$(git ls-remote https://github.com/XTLS/Xray-core "refs/tags/$tag^{}" | cut -f1)
+          [ -n "$commit" ] || commit=$(git ls-remote https://github.com/XTLS/Xray-core "refs/tags/$tag" | cut -f1)
+          [ -n "$commit" ] || { echo "::error::no commit for Xray $tag"; exit 1; }
+          echo "Xray $tag is $commit"
+          go get "github.com/xtls/xray-core@$commit"
+          go mod tidy
+          go get golang.org/x/mobile/bind@latest
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          "$(go env GOPATH)/bin/gomobile" init
+          "$(go env GOPATH)/bin/gomobile" bind -target=android -androidapi 21 -javapkg com.digicyber.client -trimpath -ldflags="-s -w -buildid= -checklinkname=0" -o ../app/libs/dccore.aar .
+          grep xray-core go.mod
+      - name: hev-socks5-tunnel (MIT), the packet-to-SOCKS bridge
+        run: |
+          tag=$(git ls-remote --tags --refs https://github.com/heiher/hev-socks5-tunnel | sed 's#.*refs/tags/##' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          echo "hev-socks5-tunnel $tag"
+          git clone --depth 1 --branch "$tag" --recurse-submodules --shallow-submodules https://github.com/heiher/hev-socks5-tunnel /tmp/hev
+          "$ANDROID_NDK_LATEST_HOME/ndk-build" -C /tmp/hev NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk NDK_APPLICATION_MK=Application.mk \
+            "APP_ABI=armeabi-v7a arm64-v8a x86 x86_64" APP_PLATFORM=android-21 \
+            NDK_LIBS_OUT="$GITHUB_WORKSPACE/android/app/src/main/jniLibs" NDK_OUT=/tmp/hev-obj \
+            "APP_CFLAGS=-O3 -DPKGNAME=com/digicyber/client/vpn" "APP_LDFLAGS=-Wl,--build-id=none" -j4
+          find android/app/src/main/jniLibs -type f ! -name '*.so' -delete
+          find android/app/src/main/jniLibs -type f
+      # OpenSSL takes most of the build; the result is kept until build.sh (and its pinned versions) change.
+      - name: Restore OpenVPN for Android
+        id: openvpn-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/ovpn-jni
+          key: openvpn-android-${{ hashFiles('android/openvpn/build.sh') }}
+      - name: OpenVPN 2.7 for Android (GPLv2), with OpenSSL, LZ4 and LZO
+        if: steps.openvpn-cache.outputs.cache-hit != 'true'
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" bash android/openvpn/build.sh /tmp/ovpn-jni
+      - name: Keep OpenVPN for Android
+        if: steps.openvpn-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/ovpn-jni
+          key: openvpn-android-${{ hashFiles('android/openvpn/build.sh') }}
+      - name: Add OpenVPN to the app
+        run: |
+          cp -r /tmp/ovpn-jni/. android/app/src/main/jniLibs/
+          find android/app/src/main/jniLibs -name libovpnexec.so -exec ls -la {} +
+      # A release's APKs must carry the key every later update is signed with, or customers have to
+      # uninstall to update; so without the key in the repository's secrets the release goes out with
+      # the desktop installers only, and Run workflow with Publish ticked adds the APKs once it is set.
+      - name: Signing key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PUBLISH: ${{ needs.version.outputs.publish }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "DC_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          elif [ "$PUBLISH" = true ]; then
+            echo "::warning::No Android signing key: this release leaves the APKs out. Add ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD (android/README.md), then Run workflow on main with Publish ticked."
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret: the APKs are signed with this runner's debug key and will not update each other."
+          fi
+      - name: Build the APKs
+        env:
+          DC_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          DC_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          DC_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          gradle -p android testReleaseUnitTest assembleRelease -PappVersion="$version" --stacktrace
+          mkdir -p release
+          for apk in android/app/build/outputs/apk/release/*.apk; do
+            abi=$(basename "$apk" .apk | sed 's/^app-//; s/-release$//')
+            cp "$apk" "release/Digi-Cyber-$version-android-$abi.apk"
+          done
+          ls -la release
+      # The emulator's data partition needs several GB the builds above have used up.
+      - name: Make room for the emulator
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost /tmp/hev /tmp/hev-obj /tmp/ovpn-android
+          go clean -cache -modcache || true
+          df -h /
+      # The emulator test connects through these (the emulator reaches this machine as 10.0.2.2).
+      - name: OpenVPN servers for the emulator test
+        run: bash android/openvpn/test-server.sh /tmp/ovpn-test
+      # A server per Xray protocol and a kernel WireGuard server, and a test panel whose profile points at them.
+      - name: Protocol servers and a test panel for the emulator test
+        run: |
+          bash android/test/protocol-servers.sh resources/bin/linux-x64/xray /tmp/proto-test
+          nohup node android/test/mock-panel.mjs /tmp/proto-test 2096 > /tmp/proto-test/panel.log 2>&1 &
+          sleep 1
+          curl -sf -X POST http://127.0.0.1:2096/sub/demo/app/v1/login -d '{"username":"demo-user","deviceId":"ci"}'
+      - name: Allow the emulator hardware acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # On an Android 11 emulator: the tunnel library registers its natives, Xray runs the app's config,
+      # and the app connects through OpenVPN over TCP and UDP.
+      - name: Run the engines on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          disable-animations: true
+          disk-size: 2048M
+          script: |
+            gradle -p android connectedDebugAndroidTest -PappVersion=0.1.0 -Pandroid.testInstrumentationRunnerArguments.ovpnTcp=$(cat /tmp/ovpn-test/tcp.link) -Pandroid.testInstrumentationRunnerArguments.ovpnUdp=$(cat /tmp/ovpn-test/udp.link) -Pandroid.testInstrumentationRunnerArguments.panel=http://10.0.2.2:2096/sub/demo ; s=$? ; adb pull /data/local/tmp/screens android-screens || true ; exit $s
+            adb install -r release/Digi-Cyber-*-android-x86_64.apk
+            adb shell am start -W -n com.digicyber.client/.ui.MainActivity
+            sleep 6
+            adb exec-out screencap -p > android-welcome.png
+            adb shell pidof com.digicyber.client
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: android-test-results
+          path: |
+            android/app/build/outputs/androidTest-results
+            android/app/build/reports/androidTests
+          if-no-files-found: ignore
+      - name: OpenVPN server logs
+        if: always()
+        run: |
+          d=$(cat /tmp/ovpn-test/dir 2>/dev/null) || exit 0
+          sudo tail -n 40 "$d"/server-*.log || true
+      - name: Protocol server and test panel logs
+        if: always()
+        run: |
+          tail -n 40 /tmp/proto-test/panel.log /tmp/proto-test/error.log /tmp/proto-test/access.log 2>/dev/null || true
+          sudo wg show wgtest 2>/dev/null || true
+      # Also in the log as base64 (between SCREEN markers), for whoever can read the log but not artifacts.
+      - name: Screens in the log
+        if: always()
+        run: |
+          for f in android-screens/*.png android-screens/*/*.png; do
+            [ -f "$f" ] || continue
+            echo "SCREEN-BEGIN $(basename "$f")"; base64 -w0 "$f"; echo; echo "SCREEN-END"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-screens
+          path: |
+            android-welcome.png
+            android-screens
+          if-no-files-found: ignore
+      # Only APKs signed with the release key go into a release.
+      - uses: actions/upload-artifact@v4
+        if: env.DC_KEYSTORE != '' || needs.version.outputs.publish != 'true'
+        with:
+          name: Digi-Cyber-Android
+          path: release/*.apk
+          if-no-files-found: error
+          retention-days: 3
+
+  release:
+    needs: [version, windows, linux, linux-distros, macos, android]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Only the installers: android-screens is a folder of test screenshots, not a release file.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Digi-Cyber-*
+          path: out
+          merge-multiple: true
+      # Before the page is rendered, so the page's check sees every file the release will have.
+      - name: Checksums
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          cd out
+          # Every installer also under its name without the version (Digi-Cyber-Setup.exe,
+          # Digi-Cyber-android-universal.apk, ...), so .../releases/latest/download/<name> is a direct
+          # link that always gives the newest version.
+          ver="${TAG#v}"
+          for f in *; do
+            s="${f/-$ver/}"
+            [ "$s" != "$f" ] && [ ! -e "$s" ] && cp "$f" "$s"
+          done
+          ls -1
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Download repository
+        id: hub
+        if: env.RELEASE_REPO != github.repository
+        run: |
+          echo "owner=${RELEASE_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${RELEASE_REPO#*/}" >> "$GITHUB_OUTPUT"
+      - name: Token of the release app
+        id: app
+        if: env.RELEASE_REPO != github.repository
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_KEY }}
+          owner: ${{ steps.hub.outputs.owner }}
+          repositories: ${{ steps.hub.outputs.name }}
+      # Rendered before anything is published, so a page linking to a missing installer stops the release.
+      - name: Download page
+        if: env.RELEASE_REPO != github.repository
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${RELEASE_REPO}.git" hub-repo
+          git -C hub-repo config user.name "${SLUG}[bot]"
+          git -C hub-repo config user.email "$(gh api "/users/${SLUG}%5Bbot%5D" --jq .id)+${SLUG}[bot]@users.noreply.github.com"
+          node scripts/hub-page.mjs --tag "$TAG" --repo "$RELEASE_REPO" --files out --out hub-repo
+          # A release needs a commit to tag: a new, empty download repository gets the page first.
+          if ! git -C hub-repo rev-parse -q --verify HEAD >/dev/null; then
+            git -C hub-repo add -A && git -C hub-repo commit -q -m "Digi Cyber download page"
+            git -C hub-repo push origin HEAD:main
+          fi
+      - name: Release
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          cd out
+          # Another repository's release is tagged on its own default branch, not on this commit.
+          target=()
+          [ "$RELEASE_REPO" = "$GITHUB_REPOSITORY" ] && target=(--target "$GITHUB_SHA")
+          # A release made on GitHub's Releases page creates the tag first; its files are added to it.
+          if gh release view "$TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" * --repo "$RELEASE_REPO" --clobber
+          else
+            gh release create "$TAG" * --repo "$RELEASE_REPO" "${target[@]}" --title "Digi Cyber $TAG" --notes-file ../RELEASE_NOTES.md
+          fi
+      - name: Publish the download page
+        if: env.RELEASE_REPO != github.repository
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          cd hub-repo
+          git add -A
+          git diff --cached --quiet || git commit -m "Digi Cyber $TAG"
+          git push origin HEAD:main
