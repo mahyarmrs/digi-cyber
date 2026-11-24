@@ -7,7 +7,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, No
 import { addSpan, pushRecent } from '../shared/activity';
 import { engineOf, runsOnXray, useOs } from '../shared/engines';
 import { helperSocket } from '../shared/helperProtocol';
-import { osOf } from '../shared/platform';
+import { executableName, osOf } from '../shared/platform';
 import { linkSecrets, redact } from '../shared/redact';
 import { parseSignIn, signInScheme, type SignInCode } from '../shared/signin';
 import type { AppConfig, AppProfile, PingResult, ProfileUpdate, Settings, SplitApp, Status } from '../shared/types';
@@ -278,10 +278,16 @@ async function pingConfig(config: AppConfig, settings: Settings): Promise<number
       JSON.stringify(xrayConfig(outbound, { socksPort, httpPort, iranDirect: false, adBlock: false, dns: dnsServers(settings.dns), hosts }), null, 2),
       { mode: 0o600 },
     );
-    proc = new EngineProcess('xray-ping', path.join(binDir, 'xray'), ['run', '-c', file], path.join(directory, 'xray.log'), binDir);
+    proc = new EngineProcess('xray-ping', path.join(binDir, executableName(system, 'xray')), ['run', '-c', file], path.join(directory, 'xray.log'), binDir);
+    proc.on('line', (line: string) => log('xray-ping', line));
     proc.start();
-    if (!(await waitForPort(httpPort, 7000, () => proc?.alive ?? false))) return null;
-    return await pingThroughProxy(httpPort, 8000, connectivityTestUrl);
+    if (!(await waitForPort(httpPort, 7000, () => proc?.alive ?? false))) {
+      log('app', `Xray ping proxy did not open its HTTP port for ${config.protocol}${proc.alive ? ' in 7 s' : ` (exit ${proc.exitCode ?? 'unknown'})`}`);
+      return null;
+    }
+    const ms = await pingThroughProxy(httpPort, 8000, connectivityTestUrl);
+    if (ms === null) log('app', `HTTP 204 test did not answer through the ${config.protocol} config`);
+    return ms;
   } catch (err) {
     log('app', `URL ping failed for ${config.protocol}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
