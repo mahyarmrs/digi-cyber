@@ -1,27 +1,21 @@
-## Digi Cyber 1.0.0
+## Digi Cyber 1.0.1
 
-The first release of Digi Cyber, the VPN app for Windows, macOS, Linux and Android.
+A maintenance release with account management, location ping, and macOS DNS improvements for the desktop app.
 
-- Sign in with your subscription link alone (no username), or scan the sign-in QR code / open the `digicyber://` sign-in link from the bot.
-- Every protocol of your service: Xray (VLESS, VMess, Trojan, Shadowsocks, Hysteria 2), WireGuard, OpenVPN and L2TP/IPsec (Windows and Linux).
-- Automatic mode tries the fastest working protocol and location for you.
-- Kill switch, split tunneling, Iranian sites without VPN, ad and tracker blocking, custom DNS.
-- WebRTC leak protection and timezone matching on the desktop.
-- Your plan's traffic, expiry and devices at a glance; the subscription refreshes itself every 10 minutes.
-- Notices from your provider, with important ones shown as a banner.
-- Send the app's log to support from inside the app.
-- Persian and English, dark and light themes.
+- Save multiple subscription accounts and switch between them without signing out of the others.
+- Measure location ping using an HTTP request to `http://google.com/generate_204` through each Xray/WireGuard config.
+- Apply and restore macOS system DNS settings while connected, with recovery after a helper restart.
 
 ### Downloads
 
 | System | File |
 | --- | --- |
 | Windows 10/11 | `Digi-Cyber-Setup.exe` |
-| Android 5.0+ | `Digi-Cyber-android-universal.apk` (or `arm64-v8a` / `armeabi-v7a`) |
 | macOS (Apple silicon) | `Digi-Cyber-mac-arm64.pkg` |
 | macOS (Intel) | `Digi-Cyber-mac-x64.pkg` |
 | Debian / Ubuntu | `Digi-Cyber-linux-amd64.deb` (`arm64` on ARM) |
 | Fedora / RHEL / openSUSE | `Digi-Cyber-linux-x86_64.rpm` (`aarch64` on ARM) |
 | Arch / Manjaro | `Digi-Cyber-linux-x64.pacman` (`aarch64` on ARM) |
+| Android | Release APKs are included only when the release signing key is configured. |
 
-`SHA256SUMS.txt` lists the checksum of every file.
+`SHA256SUMS.txt` lists the checksum of every file included in the release.
