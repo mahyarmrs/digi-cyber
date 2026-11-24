@@ -1,7 +1,60 @@
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
 
 import { answersOnUdp } from '../src/main/candidates';
+import { connectivityTestUrl, pingDirect, pingThroughProxy } from '../src/main/health';
 import { pingArgs, pingMs } from '../src/main/ping';
+
+function listen(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+  });
+}
+
+function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+}
+
+describe('location ping endpoint', () => {
+  it('uses the requested HTTP Google generate_204 URL rather than each config endpoint', () => {
+    expect(connectivityTestUrl).toBe('http://google.com/generate_204');
+  });
+
+  it('measures a direct HTTP generate_204 response', async () => {
+    let requestPath = '';
+    const server = createServer((request, response) => {
+      requestPath = request.url ?? '';
+      response.writeHead(204).end();
+    });
+    const port = await listen(server);
+    try {
+      expect(await pingDirect(1000, `http://127.0.0.1:${port}/generate_204`)).toBeGreaterThanOrEqual(1);
+      expect(requestPath).toBe('/generate_204');
+    } finally {
+      await close(server);
+    }
+  });
+
+  it('measures the HTTP request sent through a location proxy', async () => {
+    let requestUrl = '';
+    let host = '';
+    const server = createServer((request, response) => {
+      requestUrl = request.url ?? '';
+      host = request.headers.host ?? '';
+      response.writeHead(204).end();
+    });
+    const port = await listen(server);
+    try {
+      expect(await pingThroughProxy(port, 1000)).toBeGreaterThanOrEqual(1);
+      expect(requestUrl).toBe(connectivityTestUrl);
+      expect(host).toBe('google.com');
+    } finally {
+      await close(server);
+    }
+  });
+});
 
 describe('pingMs', () => {
   it('reads the round trip from the ping of each system, in any Windows language', () => {

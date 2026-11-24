@@ -5,21 +5,23 @@ import path from 'node:path';
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, powerMonitor, safeStorage, shell, Tray } from 'electron';
 
 import { addSpan, pushRecent } from '../shared/activity';
-import { engineOf, useOs } from '../shared/engines';
+import { engineOf, runsOnXray, useOs } from '../shared/engines';
 import { helperSocket } from '../shared/helperProtocol';
 import { osOf } from '../shared/platform';
 import { linkSecrets, redact } from '../shared/redact';
 import { parseSignIn, signInScheme, type SignInCode } from '../shared/signin';
-import type { AppProfile, PingResult, ProfileUpdate, Settings, SplitApp, Status } from '../shared/types';
+import type { AppConfig, AppProfile, PingResult, ProfileUpdate, Settings, SplitApp, Status } from '../shared/types';
 import { ApiError, AppApi, subscriptionAccount } from './api';
-import { answersOnUdp, serverAddress } from './candidates';
-import { tcpPing } from './health';
+import { serverAddress } from './candidates';
+import { connectivityTestUrl, freePort, pingDirect, pingThroughProxy, waitForPort } from './health';
 import { appApiBase, LinkError, subInfoUrl } from './link';
+import { EngineProcess } from './engines/process';
 import { windowsKit } from './os/windows';
 import { SessionLog, tail } from './log';
-import { icmpPing } from './ping';
 import { RemoteVpn } from './remoteVpn';
-import { Store } from './store';
+import { dnsServers, proxyOutboundFor, serverNames, xrayConfig } from './configs/xray';
+import { resolveNames } from './resolve';
+import { Store, accountIdFor } from './store';
 import { setAutostart } from './system/autostart';
 import { deviceId, deviceName } from './system/device';
 import { Vpn } from './vpn';
@@ -120,54 +122,83 @@ function profileSummary(profile: AppProfile): string {
 }
 
 // The subscription link alone signs in: the account's name comes from the subscription itself,
-// unless a sign-in link already carried it.
+// unless a sign-in link already carried it. Other saved accounts stay available for switching.
 async function login(subLink: string, given = ''): Promise<AppProfile> {
-  sessionLog.secret(...linkSecrets(subLink));
-  const api = new AppApi(appApiBase(subLink), userAgent);
-  const username = given.trim() || (await subscriptionAccount(subInfoUrl(subLink), userAgent));
-  log('app', `signing in as ${username} on ${new URL(appApiBase(subLink)).host}`);
+  const link = subLink.trim();
+  sessionLog.secret(...linkSecrets(link));
+  const api = new AppApi(appApiBase(link), userAgent);
+  const username = given.trim() || (await subscriptionAccount(subInfoUrl(link), userAgent));
+  const id = accountIdFor(link, username);
+  if (store.session(id)) {
+    const existing = await switchAccount(id);
+    if (existing) return existing;
+    throw new ApiError('bad_session', 401);
+  }
+  log('app', `signing in as ${username} on ${new URL(appApiBase(link)).host}`);
   const info = await device();
   const token = await api.login(username, info);
   sessionLog.secret(token);
   const profile = await api.profile(token, info.deviceId);
+  if (store.activeAccountId() && store.activeAccountId() !== id) {
+    // Tell the old account's panel that its tunnel left before changing the active session.
+    await vpn.disconnect();
+    await panelTold;
+    store.saveSettings({ locationId: null });
+  }
   log('app', `signed in: ${profileSummary(profile)}`);
-  store.saveSession(subLink.trim(), username, token);
+  store.saveSession(link, username, token);
   store.saveProfile(profile);
   profileCache = profile;
+  fetchedAt = Date.now();
+  noticesKnownUpTo = Math.max(0, ...(profile.notices ?? []).map((n) => n.id));
   return profile;
 }
 
 const sessionEndingCodes = ['bad_session', 'app_disabled', 'not_found'];
 
-// Fetches the profile; when the panel cannot be reached the last one is kept and the error reported.
+// Fetches the active profile; a response for an account switched away from mid-request is never
+// allowed to replace the new account's cache.
 async function fetchProfile(): Promise<ProfileUpdate | null> {
   const session = store.session();
   if (!session) return null;
   const info = await device();
   try {
-    profileCache = await new AppApi(appApiBase(session.subLink), userAgent).profile(session.token, info.deviceId);
-    store.saveProfile(profileCache);
-    if (Date.now() - fetchedAt > 60_000) log('app', `profile: ${profileSummary(profileCache)}`);
+    const profile = await new AppApi(appApiBase(session.subLink), userAgent).profile(session.token, info.deviceId);
+    store.saveProfile(profile, session.id);
+    if (store.activeAccountId() !== session.id) return null;
+    profileCache = profile;
+    if (Date.now() - fetchedAt > 60_000) log('app', `profile: ${profileSummary(profile)}`);
     fetchedAt = Date.now();
-    noticesKnownUpTo = Math.max(noticesKnownUpTo, ...(profileCache.notices ?? []).map((n) => n.id));
-    return { profile: profileCache, fetchedAt };
+    noticesKnownUpTo = Math.max(noticesKnownUpTo, ...(profile.notices ?? []).map((n) => n.id));
+    return { profile, fetchedAt };
   } catch (err) {
     log('app', `profile refresh failed: ${codeOf(err)}`);
     if (err instanceof ApiError && sessionEndingCodes.includes(err.code)) {
-      store.clearSession();
+      const wasActive = store.activeAccountId() === session.id;
+      store.clearSession(session.id);
+      if (!wasActive) return null;
+      profileCache = store.profile();
+      fetchedAt = 0;
+      noticesKnownUpTo = Math.max(0, ...(profileCache?.notices ?? []).map((n) => n.id));
+      if (store.session() && profileCache) return (await fetchProfile()) ?? { profile: profileCache, fetchedAt };
       profileCache = null;
       throw err;
     }
-    profileCache = profileCache ?? store.profile();
-    if (!profileCache) throw err;
-    return { profile: profileCache, fetchedAt, error: codeOf(err) };
+    if (store.activeAccountId() !== session.id) return null;
+    const cached = store.profile(session.id);
+    if (!cached) throw err;
+    profileCache = cached;
+    return { profile: cached, fetchedAt, error: codeOf(err) };
   }
 }
 
 async function refreshProfile(force: boolean): Promise<AppProfile | null> {
-  if (!store.session()) return null;
+  if (!store.session()) {
+    profileCache = store.profile();
+    return profileCache;
+  }
   if (!force && profileCache) return profileCache;
-  return (await fetchProfile())?.profile ?? null;
+  return (await fetchProfile())?.profile ?? profileCache ?? store.profile();
 }
 
 // Runs every 10 minutes and when the computer wakes; the window and the tray learn the result.
@@ -191,37 +222,100 @@ function announceNew(profile: AppProfile, knownBefore: number): void {
   }
 }
 
-async function logout(): Promise<void> {
-  await vpn.disconnect();
-  const session = store.session();
-  if (session) {
-    const info = await device();
-    await new AppApi(appApiBase(session.subLink), userAgent).logout(session.token, info.deviceId).catch(() => undefined);
+async function switchAccount(accountId: string): Promise<AppProfile | null> {
+  const target = store.session(accountId);
+  if (!target) throw new ApiError('bad_session', 401);
+  if (store.activeAccountId() !== accountId) {
+    await vpn.disconnect();
+    await panelTold;
+    if (!store.activateAccount(accountId)) throw new ApiError('bad_session', 401);
+    store.saveSettings({ locationId: null });
+    profileCache = store.profile(accountId);
+    fetchedAt = 0;
+    noticesKnownUpTo = Math.max(0, ...(profileCache?.notices ?? []).map((n) => n.id));
+    log('app', `switched to account ${target.username}`);
   }
-  store.clearSession();
-  profileCache = null;
+  return await refreshProfile(true).catch(() => profileCache ?? store.profile(accountId));
 }
 
-// One probe per server: TCP connect time, or ICMP for servers that answer on UDP only or refuse TCP.
+async function logout(accountId?: string): Promise<AppProfile | null> {
+  const target = store.session(accountId);
+  if (!target) return profileCache;
+  const wasActive = target.id === store.activeAccountId();
+  if (wasActive) {
+    await vpn.disconnect();
+    await panelTold;
+  }
+  const info = await device();
+  await new AppApi(appApiBase(target.subLink), userAgent).logout(target.token, info.deviceId).catch(() => undefined);
+  store.clearSession(target.id);
+  if (!wasActive) return profileCache;
+
+  profileCache = store.profile();
+  fetchedAt = 0;
+  noticesKnownUpTo = Math.max(0, ...(profileCache?.notices ?? []).map((n) => n.id));
+  if (!store.session()) {
+    profileCache = null;
+    return null;
+  }
+  return await refreshProfile(true).catch(() => profileCache);
+}
+
+async function pingConfig(config: AppConfig, settings: Settings): Promise<number | null> {
+  const outbound = proxyOutboundFor(config);
+  if (!runsOnXray(config.protocol, outbound)) return null;
+
+  let directory = '';
+  let proc: EngineProcess | null = null;
+  try {
+    directory = fs.mkdtempSync(path.join(app.getPath('userData'), 'ping-'));
+    const socksPort = await freePort();
+    const httpPort = await freePort();
+    const hosts = await resolveNames(serverNames(outbound));
+    const file = path.join(directory, 'xray.json');
+    fs.writeFileSync(
+      file,
+      JSON.stringify(xrayConfig(outbound, { socksPort, httpPort, iranDirect: false, adBlock: false, dns: dnsServers(settings.dns), hosts }), null, 2),
+      { mode: 0o600 },
+    );
+    proc = new EngineProcess('xray-ping', path.join(binDir, 'xray'), ['run', '-c', file], path.join(directory, 'xray.log'), binDir);
+    proc.start();
+    if (!(await waitForPort(httpPort, 7000, () => proc?.alive ?? false))) return null;
+    return await pingThroughProxy(httpPort, 8000, connectivityTestUrl);
+  } catch (err) {
+    log('app', `URL ping failed for ${config.protocol}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  } finally {
+    await proc?.stop(1000);
+    if (directory) fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+// Each Xray/WireGuard config gets its own local proxy and an HTTP request to Google's 204 endpoint.
+// OpenVPN/L2TP need to replace the system tunnel to probe another location; only the live one can be
+// measured safely without interrupting the user's current connection.
 async function ping(): Promise<PingResult[]> {
   const profile = profileCache ?? store.profile();
   if (!profile) return [];
-  const probes = new Map<string, Promise<number | null>>();
-  const once = (key: string, probe: () => Promise<number | null>) => {
-    let p = probes.get(key);
-    if (!p) probes.set(key, (p = probe()));
-    return p;
-  };
-  const usable = profile.configs.filter((c) => engineOf(c));
-  return Promise.all(
-    usable.map(async (config) => {
-      const target = serverAddress(config);
-      if (!target) return { link: config.link, ms: null };
-      const icmp = () => once(`icmp ${target.host}`, () => icmpPing(target.host));
-      const ms = answersOnUdp(config) ? await icmp() : ((await once(`tcp ${target.host}:${target.port}`, () => tcpPing(target.host, target.port))) ?? (await icmp()));
-      return { link: config.link, ms };
+  const usable = profile.configs.filter((config) => engineOf(config));
+  const uniqueXray = [...new Map(usable.filter((config) => engineOf(config) === 'xray').map((config) => [config.link, config])).values()];
+  const settings = store.settings();
+  const measured = new Map<string, number | null>();
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(3, uniqueXray.length) }, async () => {
+      while (next < uniqueXray.length) {
+        const config = uniqueXray[next++];
+        measured.set(config.link, await pingConfig(config, settings));
+      }
     }),
   );
+
+  const activeConfig = lastStatus.state === 'connected'
+    ? usable.find((config) => config.locationId === lastStatus.serverId && config.protocol === lastStatus.protocol && config.name === lastStatus.configName)
+    : undefined;
+  if (activeConfig && engineOf(activeConfig) !== 'xray') measured.set(activeConfig.link, await pingDirect(8000, connectivityTestUrl));
+  return usable.map((config) => ({ link: config.link, ms: measured.get(config.link) ?? null }));
 }
 
 async function connect(locationId: number | null): Promise<Status> {
@@ -271,8 +365,8 @@ async function logText(): Promise<string> {
 }
 
 function redactWithSession(text: string): string {
-  const session = store.session();
-  return session ? redact(text, [...linkSecrets(session.subLink), session.token]) : text;
+  const secrets = store.sessions().flatMap((session) => [...linkSecrets(session.subLink), session.token]);
+  return redact(text, secrets);
 }
 
 async function sendReport(message: string): Promise<{ id: string | null }> {
@@ -495,10 +589,8 @@ app.whenReady().then(async () => {
     decrypt: (sealed) => (sealed.startsWith('plain:') ? Buffer.from(sealed.slice(6), 'base64').toString() : safeStorage.decryptString(Buffer.from(sealed, 'base64'))),
   });
   const saved = store.session();
-  if (saved) {
-    sessionLog.secret(...linkSecrets(saved.subLink), saved.token);
-    log('app', `signed in as ${saved.username}`);
-  }
+  for (const account of store.sessions()) sessionLog.secret(...linkSecrets(account.subLink), account.token);
+  if (saved) log('app', `signed in as ${saved.username}`);
   if (system === 'windows') {
     vpn = new Vpn({ bin: binDir, work: path.join(app.getPath('userData'), 'run') }, windowsKit, log);
   } else {
@@ -518,9 +610,11 @@ app.whenReady().then(async () => {
   });
   handle('session', () => {
     const s = store.session();
-    return s ? { subLink: s.subLink, username: s.username } : null;
+    return s ? { id: s.id, subLink: s.subLink, username: s.username } : null;
   });
+  handle('accounts', () => store.accounts());
   handle('login', login);
+  handle('switchAccount', switchAccount);
   handle('logout', logout);
   handle('profile', (force: boolean) => refreshProfile(force));
   handle('refresh', fetchProfile);

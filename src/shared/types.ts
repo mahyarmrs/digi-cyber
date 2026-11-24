@@ -131,8 +131,16 @@ export interface Status {
 }
 
 export interface Session {
+  id: string;
   subLink: string;
   username: string;
+}
+
+export interface AccountSummary {
+  id: string;
+  username: string;
+  label: string;
+  active: boolean;
 }
 
 // Time connected per local day (YYYY-MM-DD → seconds) and the locations connected to last.
@@ -157,9 +165,11 @@ export interface ProfileUpdate {
 export interface DcApi {
   os: 'windows' | 'linux' | 'macos';
   session(): Promise<Session | null>;
+  accounts(): Promise<AccountSummary[]>;
   // The subscription link alone signs in; a sign-in link may also name the account.
   login(subLink: string, username?: string): Promise<AppProfile>;
-  logout(): Promise<void>;
+  switchAccount(id: string): Promise<AppProfile | null>;
+  logout(id?: string): Promise<AppProfile | null>;
   profile(refresh: boolean): Promise<AppProfile | null>;
   refresh(): Promise<ProfileUpdate | null>;
   settings(): Promise<Settings>;

@@ -61,7 +61,7 @@ brew install openvpn
 - **اندروید:** لینک را بچسبانید، یا کد QR ورود را با دکمه‌ی «اسکن QR» بخوانید. اگر عکس کد روی همین گوشی است، «عکس QR» را بزنید.
 - **ویندوز، مک، لینوکس:** لینک را در کادر بچسبانید. لینک‌های ورود `digicyber://` هم با یک کلیک اپ را باز می‌کنند و وارد می‌شوند.
 
-هر پلنی که خریده‌اید با همان اشتراک در اپ کار می‌کند و هر دستگاه یکی از جاهای «تعداد دستگاه» اشتراک را می‌گیرد.
+هر پلنی که خریده‌اید با همان اشتراک در اپ کار می‌کند. می‌توانید چند اکانت را ذخیره کنید و از بخش **تنظیمات ← اکانت** بینشان جابه‌جا شوید؛ برای افزودن اکانت هم لازم نیست قبلی را حذف کنید. هر اکانتِ واردشده، سهم خودش را از «تعداد دستگاه» همان اشتراک می‌گیرد.
 
 ## ✨ امکانات
 
@@ -69,6 +69,7 @@ brew install openvpn
 - حالت خودکار که سریع‌ترین پروتکل و سرور جواب‌دهنده را انتخاب می‌کند
 - کیل‌سوییچ، تونل‌زنی جداگانه برای برنامه‌ها، سایت‌های ایرانی بدون VPN، مسدود کردن تبلیغات و DNS دلخواه
 - جلوگیری از نشت WebRTC و هماهنگی منطقه‌ی زمانی روی دسکتاپ
+- ذخیره و جابه‌جایی بین چند اکانت، بدون خروج از اکانت‌های قبلی
 - حجم، زمان و دستگاه‌های اشتراک در یک نگاه؛ اشتراک هر ۱۰ دقیقه خودش به‌روز می‌شود
 - اعلان‌های سرویس‌دهنده، و ارسال گزارش خطا به پشتیبانی از داخل اپ
 - فارسی و انگلیسی، تم تیره و روشن
@@ -111,7 +112,7 @@ brew install openvpn
 
 **Digi Cyber** is a VPN app for Windows 10/11, macOS 12+, Linux and Android 5.0+. Paste the subscription link of your service and connect to the fastest server in one tap: no username needed. The download links above always give the newest version; every release lists the SHA-256 of each file in `SHA256SUMS.txt`.
 
-Protocols: Xray (VLESS, VMess, Trojan, Shadowsocks, Hysteria 2), WireGuard, OpenVPN and L2TP/IPsec (Windows and Linux). Kill switch, split tunneling, Iranian sites without VPN, ad blocking, custom DNS, WebRTC leak protection and timezone matching. Persian and English, dark and light.
+Protocols: Xray (VLESS, VMess, Trojan, Shadowsocks, Hysteria 2), WireGuard, OpenVPN and L2TP/IPsec (Windows and Linux). Save and switch between multiple accounts, without signing out of the others. Kill switch, split tunneling, Iranian sites without VPN, ad blocking, custom DNS, WebRTC leak protection and timezone matching. Persian and English, dark and light.
 
 iPhone and iPad: there is no iOS app yet; use the subscription link in Streisand or Happ.
 

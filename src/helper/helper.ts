@@ -24,6 +24,10 @@ fs.mkdirSync(work, { recursive: true, mode: 0o700 });
 const log = new SessionLog(800_000);
 log.write('helper', `Digi Cyber helper on ${os} ${process.platform} ${process.arch}, Node ${process.version}`);
 const vpn = new Vpn({ bin: path.join(__dirname, '..', 'bin'), work }, os === 'macos' ? macosKit : linuxKit, log.write);
+// If the helper or the Mac stopped while connected, put back the saved network DNS before serving requests.
+const dnsRecovery = os === 'macos'
+  ? (macosKit.restoreDns?.(null) ?? Promise.resolve()).catch((err: unknown) => log.write('helper', `DNS recovery failed: ${err instanceof Error ? err.message : String(err)}`))
+  : Promise.resolve();
 const clients = new Set<net.Socket>();
 
 function send(socket: net.Socket, message: HelperMessage): void {
@@ -35,6 +39,7 @@ vpn.on('status', (value) => {
 });
 
 async function answer(req: HelperRequest): Promise<unknown> {
+  await dnsRecovery;
   switch (req.method) {
     case 'hello':
       return { version: helperProtocolVersion, os };

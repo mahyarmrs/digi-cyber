@@ -17,7 +17,7 @@ digicyber://login?sub=<subscription link, percent-encoded>[&user=<username, perc
 - **Android**: the sign-in page takes the link (or pastes it from the clipboard); *Scan QR* opens the camera (ZXing, works without Google services) and *QR picture* reads the QR code from a screenshot or a photo. Tapping a sign-in link opens the app and signs in.
 - **Windows, Linux, macOS**: the app registers `digicyber://`, so opening the link signs in; pasting it into the subscription link field works too.
 
-Opening a link of another account while signed in asks before switching.
+A link for another account can be added while signed in. The app asks before switching to it; the previous account stays saved, and its sealed session can be selected later in **Settings → Account**. Each saved account has its own subscription link, token and cached profile.
 
 Runs on Windows 10 and 11 (64-bit), Linux (Debian, Ubuntu and their family, Fedora, RHEL, openSUSE, Arch and Manjaro; x64 and ARM64) macOS 12 or later (Intel and Apple silicon) and Android 5.0 or later (every processor family; see `android/README.md`). iOS users keep using the subscription link in Streisand, Happ or other apps, and share the same device limit with the app.
 
@@ -78,9 +78,9 @@ Engines, all started by the app (which runs as administrator):
 | OpenVPN | `openvpn.exe` 2.6 with the panel's profile, stopped through its management port. OpenVPN only opens an adapter that already exists, so the first time it is used the app adds the TAP-Windows6 and ovpn-dco drivers it ships (both signed by Microsoft) with `pnputil` and an adapter of each with `tapctl` (*Digi Cyber TAP*, *Digi Cyber DCO*); OpenVPN takes ovpn-dco (Windows 10 2004 and later) when the profile allows it and TAP otherwise, and the app tries TAP again if ovpn-dco fails. Uninstalling removes both adapters. |
 | L2TP/IPsec | Windows' own client: a VPN connection added with `Add-VpnConnection` and dialled with `rasdial`. |
 
-**Automatic** tries the Xray protocols of the chosen location first, then WireGuard, OpenVPN and L2TP, and keeps the first that answers (an Xray config must fetch `https://www.gstatic.com/generate_204` through itself).
+**Automatic** tries the Xray protocols of the chosen location first, then WireGuard, OpenVPN and L2TP, and keeps the first that answers (an Xray config must fetch `http://google.com/generate_204` through itself).
 
-The window has a sidebar (home, locations, statistics, settings, notices and the account), a hero card on the home page that carries the connection (state, location, protocol, ping and the action; it turns into the logo's gradient once protected), the plan's traffic as a bar (amber from 80%, red from 95%), time connected this week, and quick protection switches, with the locations always beside home and statistics: search, a protocol filter and every country quickest first. The locations page lists countries beside the chosen country's servers; statistics show the plan's traffic and the last 30 days; settings are an index beside cards of rows. The Android app follows the same look: the hero card, four tabs (home, locations, protection, account) and notices behind the bell. Ping is the TCP connect time to each server, or an ICMP echo through the system's `ping` for servers that answer on UDP only (WireGuard, Hysteria, L2TP, OpenVPN over UDP) or refuse the TCP connect. Persian (right to left) and English, dark, light or the system's theme, in Alexandria (Latin) and Estedad (Persian). Country names come from Natural Earth (via `world-atlas`) and `i18n-iso-countries`, written once by `scripts/gen-map.mjs`. `node scripts/preview/shoot.mjs <playwright> out.png [query]` renders the built window in Chrome with a demo account (`scripts/preview/mock-dc.js`), for screenshots.
+The window has a sidebar (home, locations, statistics, settings, notices and the account), a hero card on the home page that carries the connection (state, location, protocol, ping and the action; it turns into the logo's gradient once protected), the plan's traffic as a bar (amber from 80%, red from 95%), time connected this week, and quick protection switches, with the locations always beside home and statistics: search, a protocol filter and every country quickest first. The locations page lists countries beside the chosen country's servers; statistics show the plan's traffic and the last 30 days; settings are an index beside cards of rows. The Android app follows the same look: the hero card, four tabs (home, locations, protection, account) and notices behind the bell. Location ping starts a temporary Xray proxy for each Xray/WireGuard config and measures the HTTP round trip to `http://google.com/generate_204`; OpenVPN/L2TP can only be measured while that system tunnel is the active connection, so the app does not interrupt a live tunnel just to test another location. Persian (right to left) and English, dark, light or the system's theme, in Alexandria (Latin) and Estedad (Persian). Country names come from Natural Earth (via `world-atlas`) and `i18n-iso-countries`, written once by `scripts/gen-map.mjs`. `node scripts/preview/shoot.mjs <playwright> out.png [query]` renders the built window in Chrome with a demo account (`scripts/preview/mock-dc.js`), for screenshots.
 
 Settings:
 
@@ -88,13 +88,13 @@ Settings:
 - **Kill switch** (Xray and WireGuard): the TUN runs with `strict_route`, and if Xray stops the tunnel stays up with nothing behind it until the user disconnects.
 - **Reconnect automatically**: a dropped connection is tried again up to three times.
 - **Block ads and trackers**: `geosite:category-ads-all` goes to Xray's blackhole.
-- **Custom DNS**: the servers sing-box asks through the tunnel and Xray resolves server names with.
+- **Custom DNS**: Xray resolves server names with it and sing-box sends DNS requests through the tunnel. On macOS, the helper also applies the DNS addresses to network services while connected and restores their previous settings on disconnect (or on its next start after a crash).
 - **Split tunneling** (Xray and WireGuard): chosen `.exe` files leave directly by sing-box process rule, and **Iranian sites without VPN** sends `geosite:category-ir`, `.ir` and `geoip:ir` direct.
 - **WebRTC leak protection**: sets the `WebRtcIPHandling` policy of Chrome, Edge and Brave to `disable_non_proxied_udp` while connected, and restores it after.
 - **Match timezone**: sets Windows' timezone to the location's (`tzutil`) while connected and restores it after.
 - Launch at startup (a scheduled task, since the app needs administrator rights), launch minimized to the tray, connect when the app starts, connection notifications, language and appearance.
 
-The session token and the profile are stored sealed with Electron's `safeStorage` (DPAPI).
+Each saved account's token and profile are sealed with Electron's `safeStorage`; on systems without an available OS keyring the state file is restricted to the current user (`0600`).
 
 ## Icons
 

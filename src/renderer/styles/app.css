@@ -2009,6 +2009,7 @@ textarea.field {
   height: 40px;
   display: flex;
   align-items: center;
+  gap: 10px;
 }
 
 [data-os='windows'][dir='ltr'] .welcome-top {

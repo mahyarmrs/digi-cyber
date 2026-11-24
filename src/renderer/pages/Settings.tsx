@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
-import type { AppProfile, ProtocolChoice, Settings, SplitApp } from '../../shared/types';
+import type { AccountSummary, AppProfile, ProtocolChoice, Settings, SplitApp } from '../../shared/types';
 import { Row, Segmented, Switch } from '../components/Controls';
 import { PlusIcon, TrashIcon } from '../components/Icons';
 import { Mark, Wordmark } from '../components/Mark';
@@ -18,6 +18,10 @@ interface Props {
   onSection: (s: Section) => void;
   onChange: (patch: Partial<Settings>) => void;
   onRefresh: () => void;
+  accounts: AccountSummary[];
+  switchingAccount: string | null;
+  onAddAccount: () => void;
+  onSwitchAccount: (id: string) => void;
   onLogout: () => void;
 }
 
@@ -111,7 +115,7 @@ function General({ t, settings, onChange }: Props) {
   );
 }
 
-function Account({ t, profile, onRefresh, onLogout }: Props) {
+function Account({ t, profile, onRefresh, accounts, switchingAccount, onAddAccount, onSwitchAccount, onLogout }: Props) {
   const a = profile.account;
   const used = a.upload + a.download;
   const percent = a.total > 0 ? Math.min(100, Math.round((used / a.total) * 1000) / 10) : null;
@@ -131,6 +135,24 @@ function Account({ t, profile, onRefresh, onLogout }: Props) {
         </Row>
         <Row title={t('expires')} hint={expiry} />
         <Row title={t('devices')} hint={a.deviceLimit > 0 ? t('devicesOf', { n: '\u2068' + a.devices + '\u2069', max: '\u2068' + a.deviceLimit + '\u2069' }) : t('unlimited')} />
+      </Group>
+      <Group title={t('accounts')}>
+        {accounts.map((account) => (
+          <Row key={account.id} title={<span dir="ltr">{account.username}</span>} hint={<span dir="ltr">{account.label}</span>}>
+            {account.active ? (
+              <span className="pill ok">{t('currentAccount')}</span>
+            ) : (
+              <button type="button" className="btn btn-line btn-small" disabled={switchingAccount !== null} onClick={() => onSwitchAccount(account.id)}>
+                {switchingAccount === account.id ? t('switchingAccount') : t('switchToAccount')}
+              </button>
+            )}
+          </Row>
+        ))}
+        <div className="button-row">
+          <button type="button" className="btn btn-line btn-small" disabled={switchingAccount !== null} onClick={onAddAccount}>
+            <PlusIcon /> {t('addAccount')}
+          </button>
+        </div>
       </Group>
       <div className="button-row">
         <button type="button" className="btn btn-line" onClick={onRefresh}>
