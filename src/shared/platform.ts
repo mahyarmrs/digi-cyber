@@ -8,6 +8,10 @@ export function osOf(platform: string): Os {
   return 'linux';
 }
 
+export function executableName(os: Os, name: string): string {
+  return os === 'windows' ? `${name}.exe` : name;
+}
+
 // macOS has no L2TP client an app may set up without the user installing a profile by hand.
 export function enginesOn(os: Os): Engine[] {
   return os === 'macos' ? ['xray', 'openvpn'] : ['xray', 'openvpn', 'l2tp'];

@@ -1,21 +1,21 @@
-## Digi Cyber 1.0.1
+## Digi Cyber 1.0.2
 
-A maintenance release with account management, location ping, and macOS DNS improvements for the desktop app.
+Fixes location ping on Windows and improves diagnostics for failed ping checks.
 
-- Save multiple subscription accounts and switch between them without signing out of the others.
-- Measure location ping using an HTTP request to `http://google.com/generate_204` through each Xray/WireGuard config.
-- Apply and restore macOS system DNS settings while connected, with recovery after a helper restart.
+- Launch the temporary Xray ping engine with its Windows `.exe` filename.
+- Keep extensionless engine names on Linux and macOS.
+- Log Xray startup output and report when the temporary proxy or HTTP 204 test does not respond.
 
 ### Downloads
 
 | System | File |
 | --- | --- |
-| Windows 10/11 | `Digi-Cyber-Setup.exe` |
-| macOS (Apple silicon) | `Digi-Cyber-mac-arm64.pkg` |
-| macOS (Intel) | `Digi-Cyber-mac-x64.pkg` |
-| Debian / Ubuntu | `Digi-Cyber-linux-amd64.deb` (`arm64` on ARM) |
-| Fedora / RHEL / openSUSE | `Digi-Cyber-linux-x86_64.rpm` (`aarch64` on ARM) |
-| Arch / Manjaro | `Digi-Cyber-linux-x64.pacman` (`aarch64` on ARM) |
-| Android | Release APKs are included only when the release signing key is configured. |
+| Windows 10/11 | `Digi-Cyber-Setup-1.0.2.exe` |
+| macOS (Apple silicon) | `Digi-Cyber-1.0.2-mac-arm64.pkg` |
+| macOS (Intel) | `Digi-Cyber-1.0.2-mac-x64.pkg` |
+| Debian / Ubuntu | `Digi-Cyber-1.0.2-linux-x64.deb` (`arm64` on ARM) |
+| Fedora / RHEL / openSUSE | `Digi-Cyber-1.0.2-linux-x64.rpm` (`arm64` on ARM) |
+| Arch / Manjaro | `Digi-Cyber-1.0.2-linux-x64.pacman` (`arm64` on ARM) |
+| Android | `Digi-Cyber-1.0.2-android-<abi>.apk` (only when the release signing key is configured) |
 
 `SHA256SUMS.txt` lists the checksum of every file included in the release.

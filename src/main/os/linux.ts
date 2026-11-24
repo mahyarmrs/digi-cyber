@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { executableName } from '../../shared/platform';
 import { l2tpConnectionName, type L2tpAccount } from '../configs/l2tp';
 import { run } from '../system/run';
 import type { LogFn } from '../log';
@@ -65,7 +66,7 @@ const policyFile = 'digi-cyber-webrtc.json';
 
 export const linuxKit: SystemKit = {
   os: 'linux',
-  exe: (name) => name,
+  exe: (name) => executableName('linux', name),
   openvpnBinary() {
     return ['/usr/sbin/openvpn', '/usr/bin/openvpn', '/sbin/openvpn'].find((p) => fs.existsSync(p)) ?? null;
   },

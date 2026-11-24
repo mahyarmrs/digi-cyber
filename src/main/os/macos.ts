@@ -2,6 +2,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { executableName } from '../../shared/platform';
 import { run } from '../system/run';
 import type { SystemDnsBackup, SystemDnsResult, SystemKit } from './kit';
 
@@ -130,7 +131,7 @@ async function applyDns(servers: string[]): Promise<SystemDnsResult> {
 
 export const macosKit: SystemKit = {
   os: 'macos',
-  exe: (name) => name,
+  exe: (name) => executableName('macos', name),
   // macOS ships no OpenVPN; Homebrew's (brew install openvpn) is used when it is there.
   openvpnBinary() {
     return ['/opt/homebrew/sbin/openvpn', '/usr/local/sbin/openvpn', '/opt/homebrew/opt/openvpn/sbin/openvpn'].find((p) => fs.existsSync(p)) ?? null;

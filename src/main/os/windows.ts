@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { app } from 'electron';
 
+import { executableName } from '../../shared/platform';
 import { l2tpConnectionName, l2tpScriptEnv, l2tpScriptFile, type L2tpAccount } from '../configs/l2tp';
 import { allowL2tpBehindNat } from '../system/l2tpNat';
 import { prepareOpenvpnAdapters } from '../system/openvpnAdapters';
@@ -44,7 +45,7 @@ const l2tp = {
 
 export const windowsKit: SystemKit = {
   os: 'windows',
-  exe: (name) => `${name}.exe`,
+  exe: (name) => executableName('windows', name),
   openvpnBinary(binDir) {
     const exe = path.join(binDir, 'openvpn', 'openvpn.exe');
     return fs.existsSync(exe) ? exe : null;
