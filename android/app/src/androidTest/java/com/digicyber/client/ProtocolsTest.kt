@@ -4,6 +4,9 @@ import android.os.ParcelFileDescriptor
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -77,8 +80,12 @@ class ProtocolsTest {
                     val localOutbound = JSONObject("{\"protocol\":\"freedom\"}")
                     val localConfig = Config("vless", "URL test", "vless://local-test", null, localOutbound)
                     val endpoint = "http://10.0.2.2:2096/connectivity"
-                    val measured = runBlocking { Ping.urlTest(localConfig, Repo.settings.value, "$endpoint/generate_204") }
-                    assertTrue("HTTP 204 URL test succeeds through isolated Xray", measured != null && measured > 0)
+                    val measured = runBlocking {
+                        coroutineScope {
+                            List(3) { async { Ping.urlTest(localConfig, Repo.settings.value, "$endpoint/generate_204") } }.awaitAll()
+                        }
+                    }
+                    assertTrue("all concurrent HTTP 204 URL tests succeed through isolated Xray", measured.all { it != null && it > 0 })
                     assertEquals("the live connection remains up during URL tests", ConnState.Connected, VpnState.status.value.state)
                     assertTrue("the live Xray core was not replaced", Core.isRunning())
                     assertNull("a response other than 204 is not a successful URL test", runBlocking { Ping.urlTest(localConfig, Repo.settings.value, "$endpoint/not-204") })

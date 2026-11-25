@@ -3,6 +3,7 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -12,12 +13,14 @@ import (
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
+const maxPingInstances = 2
+
 var (
-	mu           sync.Mutex
-	instance     *xcore.Instance
-	pingMu       sync.Mutex
-	pingInstance *xcore.Instance
-	lifecycleMu  sync.Mutex
+	mu            sync.Mutex
+	instance      *xcore.Instance
+	pingMu        sync.Mutex
+	pingInstances [maxPingInstances]*xcore.Instance
+	lifecycleMu   sync.Mutex
 )
 
 // SetAssetDir tells Xray where geoip.dat and geosite.dat are.
@@ -64,14 +67,18 @@ func Stop() {
 }
 
 // StartPing runs an isolated Xray instance for location checks without replacing the user's VPN.
-func StartPing(configJSON string) error {
+// Separate slots let Android check a few locations at once, like the desktop builds do.
+func StartPing(slot int32, configJSON string) error {
+	if slot < 0 || slot >= maxPingInstances {
+		return errors.New("invalid ping instance slot")
+	}
 	pingMu.Lock()
 	defer pingMu.Unlock()
 	lifecycleMu.Lock()
 	defer lifecycleMu.Unlock()
-	if pingInstance != nil {
-		pingInstance.Close()
-		pingInstance = nil
+	if pingInstances[slot] != nil {
+		pingInstances[slot].Close()
+		pingInstances[slot] = nil
 	}
 	config, err := serial.LoadJSONConfig(strings.NewReader(configJSON))
 	if err != nil {
@@ -85,18 +92,21 @@ func StartPing(configJSON string) error {
 		server.Close()
 		return err
 	}
-	pingInstance = server
+	pingInstances[slot] = server
 	return nil
 }
 
-func StopPing() {
+func StopPing(slot int32) {
+	if slot < 0 || slot >= maxPingInstances {
+		return
+	}
 	pingMu.Lock()
 	defer pingMu.Unlock()
 	lifecycleMu.Lock()
 	defer lifecycleMu.Unlock()
-	if pingInstance != nil {
-		pingInstance.Close()
-		pingInstance = nil
+	if pingInstances[slot] != nil {
+		pingInstances[slot].Close()
+		pingInstances[slot] = nil
 	}
 }
 

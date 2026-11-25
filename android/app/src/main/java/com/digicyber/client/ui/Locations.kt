@@ -61,7 +61,7 @@ import com.digicyber.client.data.Settings
 import com.digicyber.client.vpn.Candidates
 import com.digicyber.client.vpn.VpnState
 
-private data class CountryGroup(val key: String, val code: String, val name: String, val locations: List<Location>, val ping: Int?)
+private data class CountryGroup(val key: String, val code: String, val name: String, val locations: List<Location>, val ping: Int?, val pendingPing: Boolean)
 
 // The protocol family a config belongs to, for the list's filter.
 private fun family(protocol: String): String = when (protocol) {
@@ -90,6 +90,9 @@ fun LocationsScreen(p: Profile, settings: Settings, activity: MainActivity, focu
 
     val runnable = remember(p) { p.configs.filter { Candidates.runnable(it) } }
     val families = remember(runnable) { listOf("xray", "wireguard", "openvpn").filter { f -> runnable.any { family(it.protocol) == f } } }
+    val pendingPingLocations = remember(runnable, pings) {
+        runnable.filter { it.link !in pings }.mapNotNull { it.locationId }.toSet()
+    }
     val active = if (status.state != ConnState.Disconnected) status.serverId ?: status.locationId else null
     val q = query.trim().lowercase()
     val groups = remember(p, filter, q, pings, t.language) {
@@ -98,7 +101,14 @@ fun LocationsScreen(p: Profile, settings: Settings, activity: MainActivity, focu
             val code = list.first().countryCode
             val name = Geo.name(context, code, t.language).ifEmpty { list.first().name.ifEmpty { code } }
             val sorted = list.sortedBy { Candidates.bestPing(p, pings, it.id) ?: Int.MAX_VALUE }
-            CountryGroup(key, code, name, sorted, sorted.mapNotNull { Candidates.bestPing(p, pings, it.id) }.minOrNull())
+            CountryGroup(
+                key,
+                code,
+                name,
+                sorted,
+                sorted.mapNotNull { Candidates.bestPing(p, pings, it.id) }.minOrNull(),
+                list.any { it.id in pendingPingLocations },
+            )
         }.filter { g ->
             q.isEmpty() || g.name.lowercase().contains(q) || Geo.name(context, g.code, "en").lowercase().contains(q) || Geo.name(context, g.code, "fa").contains(q) ||
                 g.code.lowercase() == q || g.locations.any { it.name.lowercase().contains(q) || it.city.lowercase().contains(q) }
@@ -231,7 +241,7 @@ fun LocationsScreen(p: Profile, settings: Settings, activity: MainActivity, focu
                             }
                             if (sub.isNotEmpty()) Text(sub, color = c.muted, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        PingText(g.ping, pinging)
+                        PingText(g.ping, pinging && g.pendingPing)
                         Spacer(Modifier.width(10.dp))
                         when {
                             many -> Icon(painterResource(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down), null, tint = c.text, modifier = Modifier.size(24.dp))
@@ -253,7 +263,7 @@ fun LocationsScreen(p: Profile, settings: Settings, activity: MainActivity, focu
                                 val countryNames = setOf(g.name, Geo.name(context, g.code, "en"), Geo.name(context, g.code, "fa"))
                                 if (l.city.isNotEmpty() && l.name.isNotEmpty() && l.name !in countryNames) Text(l.name, color = c.muted, fontSize = 13.sp)
                             }
-                            PingText(Candidates.bestPing(p, pings, l.id), pinging)
+                            PingText(Candidates.bestPing(p, pings, l.id), pinging && l.id in pendingPingLocations)
                             Spacer(Modifier.width(10.dp))
                             if (chosen) Icon(painterResource(R.drawable.ic_check), null, tint = c.accent, modifier = Modifier.size(22.dp)) else Spacer(Modifier.size(22.dp))
                         }

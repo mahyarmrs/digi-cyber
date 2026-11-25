@@ -13,6 +13,10 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -29,7 +33,9 @@ import com.digicyber.client.data.Repo
 object Ping {
     const val connectivityTestUrl = "http://google.com/generate_204"
     private const val timeoutMs = 8_000
-    private val xrayLock = Mutex()
+    private const val pingInstanceCount = 2
+    private val pingSlots = Channel<Int>(pingInstanceCount).apply { repeat(pingInstanceCount) { trySend(it) } }
+    private val pingStartMutex = Mutex()
     private val hostPattern = Regex("^[A-Za-z0-9.:_\\[\\]][A-Za-z0-9.:_\\-\\[\\]%]*$")
 
     fun tcp(host: String, port: Int, timeoutMs: Int = 3000): Int? = runCatching {
@@ -67,7 +73,7 @@ object Ping {
         return HashMap(out)
     }
 
-    private fun measure204(config: Config, settings: Settings, testUrl: String): Int? {
+    private suspend fun measure204(config: Config, settings: Settings, testUrl: String, slot: Int): Int? {
         val outbound = XrayConfig.proxyOutboundFor(config.protocol, config.link, config.outbound)
         if (outbound == null) {
             AppLog.w("ping", "${config.protocol}: no Xray outbound for URL test")
@@ -83,18 +89,23 @@ object Ping {
         try {
             val context = Repo.context()
             Core.setAssetDir(XrayAssets.ensure(context))
-            val port = freePort()
             val hosts = resolve(XrayConfig.serverNames(outbound))
-            val configJson = XrayConfig.build(
-                outbound = outbound,
-                socksPort = port,
-                iranDirect = false,
-                adBlock = false,
-                dns = XrayConfig.dnsServers(settings.dns),
-                hosts = hosts,
-                logLevel = "warning",
-            )
-            Core.startPing(configJson)
+            // Keep port selection and engine startup together: parallel tests must not pick the same
+            // short-lived free port before either SOCKS listener binds it.
+            val port = pingStartMutex.withLock {
+                val candidate = freePort()
+                val configJson = XrayConfig.build(
+                    outbound = outbound,
+                    socksPort = candidate,
+                    iranDirect = false,
+                    adBlock = false,
+                    dns = XrayConfig.dnsServers(settings.dns),
+                    hosts = hosts,
+                    logLevel = "warning",
+                )
+                Core.startPing(slot, configJson)
+                candidate
+            }
 
             val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
             conn = (url.openConnection(proxy) as HttpURLConnection).apply {
@@ -120,33 +131,56 @@ object Ping {
             return null
         } finally {
             conn?.disconnect()
-            runCatching { Core.stopPing() }
+            runCatching { Core.stopPing(slot) }
         }
     }
 
     // Available to instrumentation tests with a local 204 endpoint; production calls use the same
     // fixed Google endpoint as the desktop builds.
-    suspend fun urlTest(config: Config, settings: Settings, testUrl: String = connectivityTestUrl): Int? =
-        xrayLock.withLock { withContext(Dispatchers.IO) { measure204(config, settings, testUrl) } }
-
-    private suspend fun allXray(profile: Profile, settings: Settings): Map<String, Int?> {
-        val out = linkedMapOf<String, Int?>()
-        for (config in profile.configs.filter { it.protocol != "openvpn" && Candidates.runnable(it) }.distinctBy { it.link }) {
-            out[config.link] = urlTest(config, settings)
+    suspend fun urlTest(config: Config, settings: Settings, testUrl: String = connectivityTestUrl): Int? = withContext(Dispatchers.IO) {
+        val slot = pingSlots.receive()
+        try {
+            measure204(config, settings, testUrl, slot)
+        } finally {
+            pingSlots.trySend(slot)
         }
-        return out
+    }
+
+    private suspend fun allXray(
+        profile: Profile,
+        settings: Settings,
+        onResult: suspend (String, Int?) -> Unit,
+    ): Map<String, Int?> = coroutineScope {
+        profile.configs
+            .filter { it.protocol != "openvpn" && Candidates.runnable(it) }
+            .distinctBy { it.link }
+            .map { config ->
+                async {
+                    val result = urlTest(config, settings)
+                    onResult(config.link, result)
+                    config.link to result
+                }
+            }
+            .awaitAll()
+            .toMap()
     }
 
     // OpenVPN is tested at its remote endpoint on Android, where the VPN app itself is excluded from
     // the tunnel to keep Xray/OpenVPN sockets from looping back into it. Xray and WireGuard locations
     // get the same HTTP 204 URL check as desktop through an isolated Xray instance.
-    suspend fun all(profile: Profile, settings: Settings): Map<String, Int?> = withContext(Dispatchers.IO) {
-        val urlResults = allXray(profile, settings)
-        val openVpnResults = profile.configs.filter { it.protocol == "openvpn" && Candidates.runnable(it) }.map { config ->
-            val target = Candidates.serverAddress(config) ?: return@map config.link to null
-            val (host, port) = target
-            val ms = if (Candidates.answersOnUdp(config)) icmp(host) else (tcp(host, port) ?: icmp(host))
-            config.link to ms
+    suspend fun all(
+        profile: Profile,
+        settings: Settings,
+        onResult: suspend (String, Int?) -> Unit = { _, _ -> },
+    ): Map<String, Int?> = withContext(Dispatchers.IO) {
+        val urlResults = allXray(profile, settings, onResult)
+        val openVpnResults = linkedMapOf<String, Int?>()
+        for (config in profile.configs.filter { it.protocol == "openvpn" && Candidates.runnable(it) }) {
+            val result = Candidates.serverAddress(config)?.let { (host, port) ->
+                if (Candidates.answersOnUdp(config)) icmp(host) else (tcp(host, port) ?: icmp(host))
+            }
+            openVpnResults[config.link] = result
+            onResult(config.link, result)
         }
         urlResults + openVpnResults
     }

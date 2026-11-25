@@ -5,6 +5,7 @@ import java.io.File
 
 // The same geo database files are shared by the live VPN engine and isolated URL-test instances.
 object XrayAssets {
+    @Synchronized
     fun ensure(context: Context): String {
         val dir = File(context.filesDir, "xray").apply { mkdirs() }
         val marker = File(dir, "version")

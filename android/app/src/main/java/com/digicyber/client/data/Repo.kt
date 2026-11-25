@@ -46,6 +46,7 @@ object Repo {
     private var accountRecords = mutableListOf<SavedAccount>()
     private val accountMutex = Mutex()
     private val pingMutex = Mutex()
+    private val pingResultMutex = Mutex()
     private var openSince = 0L
 
     val userAgent: String get() = "DigiCyber/${BuildConfig.VERSION_NAME} (android)"
@@ -433,9 +434,14 @@ object Repo {
     suspend fun ping() = pingMutex.withLock {
         val accountId = activeAccountId.value ?: return@withLock
         val p = profile.value ?: return@withLock
+        pings.value = emptyMap()
         pinging.value = true
         try {
-            val result = Ping.all(p, settings.value)
+            val result = Ping.all(p, settings.value) { link, ms ->
+                if (activeAccountId.value == accountId) {
+                    pingResultMutex.withLock { pings.value = pings.value + (link to ms) }
+                }
+            }
             if (activeAccountId.value == accountId) pings.value = result
         } finally {
             pinging.value = false
