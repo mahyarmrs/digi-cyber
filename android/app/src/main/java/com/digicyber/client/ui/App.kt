@@ -67,8 +67,18 @@ fun DcRoot(activity: MainActivity) {
     DcTheme(dark) {
         CompositionLocalProvider(LocalT provides t, LocalLayoutDirection provides if (t.rtl) LayoutDirection.Rtl else LayoutDirection.Ltr) {
             Surface(Modifier.fillMaxSize(), color = LocalDc.current.background) {
-                if (signedIn && !addingAccount) MainScreen(activity) else SignedOutScreen(addingAccount)
-                if (signedIn && !addingAccount) SwitchAccount()
+                if (signedIn) {
+                    MainScreen(activity)
+                    if (addingAccount) {
+                        Box(Modifier.fillMaxSize().background(LocalDc.current.background)) {
+                            SignedOutScreen(addingAccount = true)
+                        }
+                    } else {
+                        SwitchAccount()
+                    }
+                } else {
+                    SignedOutScreen(addingAccount)
+                }
             }
         }
     }
