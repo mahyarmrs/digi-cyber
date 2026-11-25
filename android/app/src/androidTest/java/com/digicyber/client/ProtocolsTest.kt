@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.ConcurrentHashMap
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -86,6 +87,17 @@ class ProtocolsTest {
                         }
                     }
                     assertTrue("all concurrent HTTP 204 URL tests succeed through isolated Xray", measured.all { it != null && it > 0 })
+                    val testedConfigs = (1..3).map { id -> Config("vless", "URL test $id", "vless://local-test-$id", id, localOutbound) }
+                    val observed = ConcurrentHashMap<String, Int>()
+                    val results = runBlocking {
+                        Ping.all(profile.copy(configs = testedConfigs), Repo.settings.value, "$endpoint/generate_204") { link, ms ->
+                            if (ms != null) observed[link] = ms
+                        }
+                    }
+                    val testedLinks = testedConfigs.map { it.link }.toSet()
+                    assertEquals("all runnable Xray connections are tested", testedLinks, results.keys)
+                    assertTrue("each result is delivered as its connection answers", testedLinks.all { (observed[it] ?: 0) > 0 })
+                    assertTrue("every tested Xray connection succeeds", testedLinks.all { (results[it] ?: 0) > 0 })
                     assertEquals("the live connection remains up during URL tests", ConnState.Connected, VpnState.status.value.state)
                     assertTrue("the live Xray core was not replaced", Core.isRunning())
                     assertNull("a response other than 204 is not a successful URL test", runBlocking { Ping.urlTest(localConfig, Repo.settings.value, "$endpoint/not-204") })

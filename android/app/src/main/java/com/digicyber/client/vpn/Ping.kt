@@ -149,6 +149,7 @@ object Ping {
     private suspend fun allXray(
         profile: Profile,
         settings: Settings,
+        testUrl: String,
         onResult: suspend (String, Int?) -> Unit,
     ): Map<String, Int?> = coroutineScope {
         profile.configs
@@ -156,7 +157,7 @@ object Ping {
             .distinctBy { it.link }
             .map { config ->
                 async {
-                    val result = urlTest(config, settings)
+                    val result = urlTest(config, settings, testUrl)
                     onResult(config.link, result)
                     config.link to result
                 }
@@ -171,9 +172,10 @@ object Ping {
     suspend fun all(
         profile: Profile,
         settings: Settings,
+        testUrl: String = connectivityTestUrl,
         onResult: suspend (String, Int?) -> Unit = { _, _ -> },
     ): Map<String, Int?> = withContext(Dispatchers.IO) {
-        val urlResults = allXray(profile, settings, onResult)
+        val urlResults = allXray(profile, settings, testUrl, onResult)
         val openVpnResults = linkedMapOf<String, Int?>()
         for (config in profile.configs.filter { it.protocol == "openvpn" && Candidates.runnable(it) }) {
             val result = Candidates.serverAddress(config)?.let { (host, port) ->
