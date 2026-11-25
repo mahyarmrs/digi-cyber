@@ -1,16 +1,16 @@
-// The app API of a Manifold panel, as far as the emulator tests need it: the subscription's summary
-// (?format=info) that names its account, sign-in with a username,
-// the profile with one location per protocol (each config's outbound from protocol-servers.sh),
-// a Persian notice and an announcement, and sign-out. The emulator reaches it as http://10.0.2.2:2096/sub/demo.
-// Usage: node mock-panel.mjs <dir with the outbounds of protocol-servers.sh> [port]
+// The app API of a Manifold panel, as far as the emulator tests need it: two subscriptions for
+// multi-account tests, the subscription summaries, sign-in, protocol outbounds, and support reports.
+// The emulator reaches it as http://10.0.2.2:2096/sub/demo. Usage: node mock-panel.mjs <outbounds-dir> [port]
 import fs from 'node:fs';
 import http from 'node:http';
 import zlib from 'node:zlib';
 
 const dir = process.argv[2];
 const port = Number(process.argv[3] ?? 2096);
-const username = 'demo-user';
-const token = 'test-session-token';
+const accounts = {
+  demo: { username: 'demo-user', token: 'test-session-token' },
+  other: { username: 'other-user', token: 'test-session-token-other' },
+};
 const outbound = (name) => JSON.parse(fs.readFileSync(`${dir}/${name}.json`, 'utf8'));
 const linkFile = (name) => (fs.existsSync(`${dir}/${name}.link`) ? fs.readFileSync(`${dir}/${name}.link`, 'utf8').trim() : null);
 const reports = [];
@@ -28,7 +28,7 @@ const locations = [
   { id: 8, name: 'Armenia', countryCode: 'AM', city: 'Yerevan', timezone: 'Asia/Yerevan', protocol: 'vless', file: 'vless-plain', host: '10-0-2-2.sslip.io', port: 8082 },
 ];
 
-function profile() {
+function profile(username) {
   const now = Date.now();
   return {
     account: { username, enabled: true, expiryTime: now + 23 * day + 3_600_000, upload: 1_310_720_000, download: 13_958_643_712, total: 53_687_091_200, deviceLimit: 3, devices: 1 },
@@ -62,22 +62,32 @@ http.createServer((req, res) => {
   req.setEncoding('latin1');
   req.on('data', (chunk) => (body += chunk));
   req.on('end', () => {
-    const path = new URL(req.url, 'http://x').pathname;
+    const url = new URL(req.url, 'http://x');
+    const path = url.pathname;
     console.log(new Date().toISOString(), req.method, path, req.headers['user-agent'] ?? '');
-    // The subscription's summary, which names its account: what signing in with the link alone reads.
-    if (path === '/sub/demo' && new URL(req.url, 'http://x').searchParams.get('format') === 'info') return send(res, 200, { emails: [username], total: 53_687_091_200 });
-    if (!path.startsWith('/sub/demo/app/v1/')) return send(res, 404, { error: 'not_found' });
-    const call = path.slice('/sub/demo/app/v1/'.length);
+    if (path === '/connectivity/generate_204') {
+      res.writeHead(204, { 'Cache-Control': 'no-store' });
+      return res.end();
+    }
+    if (path === '/connectivity/not-204') return send(res, 200, { ok: true });
+
+    const match = path.match(/^\/sub\/([^/]+)(?:\/app\/v1\/(.*))?$/);
+    const account = match ? accounts[match[1]] : null;
+    if (!match || !account) return send(res, 404, { error: 'not_found' });
+    if (!match[2] && url.searchParams.get('format') === 'info') return send(res, 200, { emails: [account.username], total: 53_687_091_200 });
+    if (!match[2]) return send(res, 404, { error: 'not_found' });
+
+    const call = match[2];
     if (call === 'login' && req.method === 'POST') {
       const login = JSON.parse(body || '{}');
-      if (login.username !== username) return send(res, 401, { error: 'bad_login' });
+      if (login.username !== account.username) return send(res, 401, { error: 'bad_login' });
       if (!login.deviceId) return send(res, 400, { error: 'bad_device' });
-      return send(res, 200, { token });
+      return send(res, 200, { token: account.token });
     }
-    if (req.headers.authorization !== `Bearer ${token}`) return send(res, 401, { error: 'bad_session' });
-    if (call === 'profile' && req.method === 'GET') return send(res, 200, profile());
+    if (req.headers.authorization !== `Bearer ${account.token}`) return send(res, 401, { error: 'bad_session' });
+    if (call === 'profile' && req.method === 'GET') return send(res, 200, profile(account.username));
     if (call === 'logout' && req.method === 'POST') return send(res, 200, {});
-    // A support report, gzipped JSON; the test reads back what arrived from /sub/demo/app/v1/reports.
+    // A support report, gzipped JSON; the test reads back what arrived from the panel.
     if (call === 'report' && req.method === 'POST') {
       let report = null;
       try {
@@ -85,7 +95,7 @@ http.createServer((req, res) => {
       } catch {
         return send(res, 400, { error: 'bad_request' });
       }
-      reports.push({ encoding: req.headers['content-encoding'] ?? '', message: report.message, logChars: String(report.log ?? '').length, os: report.os, appVersion: report.appVersion });
+      reports.push({ account: account.username, encoding: req.headers['content-encoding'] ?? '', message: report.message, logChars: String(report.log ?? '').length, os: report.os, appVersion: report.appVersion });
       return send(res, 200, { id: reports.length });
     }
     if (call === 'reports' && req.method === 'GET') return send(res, 200, reports);

@@ -68,15 +68,15 @@ import com.digicyber.client.data.Repo
 import com.digicyber.client.data.SignIn
 import com.digicyber.client.data.SignInCode
 
-// Signed out: one page that signs in with the subscription link alone, and the QR scanner. A sign-in
-// code (QR, picture, pasted text or a tapped digicyber:// link) signs in at once.
+// Signed out or adding an account: one page that signs in with the subscription link alone, and the QR scanner.
+// A sign-in code (QR, picture, pasted text or a tapped digicyber:// link) signs in at once.
 @Composable
-fun SignedOutScreen() {
+fun SignedOutScreen(addingAccount: Boolean = false) {
     val t = LocalT.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var scanning by rememberSaveable { mutableStateOf(false) }
-    var link by rememberSaveable { mutableStateOf(Repo.lastSubLink()) }
+    var link by rememberSaveable(addingAccount) { mutableStateOf(if (addingAccount) "" else Repo.lastSubLink()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     val reason by Repo.signOutReason.collectAsState()
@@ -87,8 +87,10 @@ fun SignedOutScreen() {
         busy = true
         error = ""
         scope.launch {
+            var succeeded = false
             try {
                 Repo.login(code.subLink, code.username)
+                succeeded = true
                 Repo.ping()
             } catch (e: ApiException) {
                 error = t.error(e.code)
@@ -96,6 +98,7 @@ fun SignedOutScreen() {
                 error = t.error("unexpected")
             } finally {
                 busy = false
+                if (succeeded) Repo.cancelAddAccount()
             }
         }
     }
@@ -125,7 +128,9 @@ fun SignedOutScreen() {
         Repo.pendingSignIn.value = null
         signIn(code)
     }
-    BackHandler(enabled = scanning) { scanning = false }
+    BackHandler(enabled = scanning || addingAccount) {
+        if (scanning) scanning = false else if (!busy) Repo.cancelAddAccount()
+    }
 
     if (scanning) {
         ScannerScreen(message = "", onResult = { scanned(it) }, onImage = { pickImage.launch("image/*") }, onClose = { scanning = false })
@@ -152,6 +157,8 @@ fun SignedOutScreen() {
             scanning = true
         },
         onImage = { pickImage.launch("image/*") },
+        addingAccount = addingAccount,
+        onCancel = { Repo.cancelAddAccount() },
     )
 }
 
@@ -184,6 +191,8 @@ private fun SignInPage(
     onPaste: (String) -> Unit,
     onScan: () -> Unit,
     onImage: () -> Unit,
+    addingAccount: Boolean = false,
+    onCancel: () -> Unit = {},
 ) {
     val t = LocalT.current
     val c = LocalDc.current
@@ -222,8 +231,15 @@ private fun SignInPage(
             }
         }
         Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 22.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text(t("signInTitle"), fontSize = 26.sp, fontWeight = FontWeight.Bold, color = c.text)
-            Text(t("signInHint"), fontSize = 15.sp, lineHeight = 24.sp, color = c.muted)
+            Text(t(if (addingAccount) "addAccount" else "signInTitle"), fontSize = 26.sp, fontWeight = FontWeight.Bold, color = c.text)
+            if (addingAccount) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(t("addAccountIntro"), fontSize = 15.sp, lineHeight = 24.sp, color = c.muted, modifier = Modifier.weight(1f))
+                    TextButton(enabled = !busy, onClick = onCancel) { Text(t("cancel"), color = c.accent) }
+                }
+            } else {
+                Text(t("signInHint"), fontSize = 15.sp, lineHeight = 24.sp, color = c.muted)
+            }
             Ltr {
                 OutlinedTextField(
                     value = link,
@@ -244,7 +260,7 @@ private fun SignInPage(
                 )
             }
             MessageText(error, true)
-            GradientButton(if (busy) t("signingIn") else t("signIn"), enabled = link.isNotBlank(), loading = busy, onClick = onSubmit)
+            GradientButton(if (busy) t("signingIn") else t("signIn"), enabled = link.isNotBlank() && !busy, loading = busy, onClick = onSubmit)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(Modifier.weight(1f), color = c.line)
                 Text(t("or"), color = c.muted, modifier = Modifier.padding(horizontal = 12.dp))

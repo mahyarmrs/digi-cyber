@@ -11,11 +11,16 @@ import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import com.digicyber.client.BuildConfig
 import com.digicyber.client.core.Core
 import com.digicyber.client.vpn.Candidates
+import com.digicyber.client.vpn.DcVpnService
 import com.digicyber.client.vpn.Ping
 import com.digicyber.client.vpn.VpnState
 
@@ -32,9 +37,15 @@ object Repo {
     val fetchedAt = MutableStateFlow(0L)
     val pings = MutableStateFlow<Map<String, Int?>>(emptyMap())
     val pinging = MutableStateFlow(false)
+    val accounts = MutableStateFlow<List<AccountSummary>>(emptyList())
+    val activeAccountId = MutableStateFlow<String?>(null)
+    val addingAccount = MutableStateFlow(false)
     // A sign-in code that arrived as a digicyber:// link, waiting for the window to act on it.
     val pendingSignIn = MutableStateFlow<SignInCode?>(null)
     val sessions = MutableStateFlow<List<Session>>(emptyList())
+    private var accountRecords = mutableListOf<SavedAccount>()
+    private val accountMutex = Mutex()
+    private val pingMutex = Mutex()
     private var openSince = 0L
 
     val userAgent: String get() = "DigiCyber/${BuildConfig.VERSION_NAME} (android)"
@@ -46,17 +57,66 @@ object Repo {
         app = application
         prefs = application.getSharedPreferences("dt", Context.MODE_PRIVATE)
         settings.value = Settings.parse(prefs.getString("settings", null))
-        val stored = prefs.getString("profile", null)
-        profile.value = stored?.let { runCatching { Profile.parse(it) }.getOrNull() }
-        signedIn.value = prefs.getString("token", null) != null && profile.value != null
-        fetchedAt.value = prefs.getLong("fetchedAt", 0L)
+        val storedAccounts = prefs.getString("accounts", null)
+        val migrated = AccountSessions.migrate(
+            serialized = storedAccounts,
+            activeAccountId = prefs.getString("activeAccountId", null),
+            legacySubLink = prefs.getString("subLink", null),
+            legacyUsername = prefs.getString("username", null),
+            legacyToken = prefs.getString("token", null),
+            legacyProfile = prefs.getString("profile", null),
+            legacyFetchedAt = prefs.getLong("fetchedAt", 0L),
+        )
+        accountRecords = migrated.accounts.toMutableList()
+        activeAccountId.value = migrated.activeAccountId
+        accounts.value = AccountSessions.summaries(accountRecords, activeAccountId.value)
+        val active = activeAccount()
+        profile.value = active?.profile?.let { runCatching { Profile.parse(it) }.getOrNull() }
+        fetchedAt.value = active?.fetchedAt ?: 0L
+        signedIn.value = active?.token?.isNotEmpty() == true && profile.value != null
+        signOutReason.value = ""
         sessions.value = Secured.decode(prefs.getString("sessions", null))
         // A session the app was stopped in counts until the last time it was seen running.
         val since = prefs.getLong("openSince", 0L)
         val seen = prefs.getLong("openSeen", 0L)
         if (since > 0) closeSession(Session(since, maxOf(since, seen)))
-        AppLog.secret(prefs.getString("token", null), *(prefs.getString("subLink", null)?.let { AppLog.linkSecrets(it).toTypedArray() } ?: emptyArray()))
+        val oldKeysRemain = listOf("subLink", "username", "token", "profile", "fetchedAt").any(prefs::contains)
+        if (oldKeysRemain || storedAccounts != AccountSessions.encode(accountRecords) || prefs.getString("activeAccountId", null) != activeAccountId.value) {
+            persistAccounts()
+        }
+        for (account in accountRecords) AppLog.secret(account.token, *AppLog.linkSecrets(account.subLink).toTypedArray())
         if (signedIn.value) AppLog.i("app", "signed in as ${lastUsername()}: ${profile.value?.let { summary(it) }}")
+    }
+
+    private fun activeAccount(): SavedAccount? = accountRecords.firstOrNull { it.id == activeAccountId.value }
+
+    private fun persistAccounts() {
+        val validActive = activeAccountId.value?.takeIf { id -> accountRecords.any { it.id == id } }
+        activeAccountId.value = validActive
+        val editor = prefs.edit()
+            .putString("accounts", AccountSessions.encode(accountRecords))
+            .remove("subLink")
+            .remove("username")
+            .remove("token")
+            .remove("profile")
+            .remove("fetchedAt")
+        if (validActive == null) editor.remove("activeAccountId") else editor.putString("activeAccountId", validActive)
+        editor.apply()
+        accounts.value = AccountSessions.summaries(accountRecords, validActive)
+    }
+
+    private fun clearPings() {
+        pings.value = emptyMap()
+    }
+
+    fun beginAddAccount() {
+        pendingSignIn.value = null
+        addingAccount.value = true
+    }
+
+    fun cancelAddAccount() {
+        pendingSignIn.value = null
+        addingAccount.value = false
     }
 
     fun summary(p: Profile): String {
@@ -123,55 +183,146 @@ object Repo {
     )
 
     // The subscription link alone signs in: the account's name comes from the subscription itself,
-    // unless a sign-in link already carried it.
+    // unless a sign-in link already carried it. Other saved accounts stay available for switching.
     suspend fun login(subLink: String, given: String = "") = withContext(Dispatchers.IO) {
-        AppLog.secret(*AppLog.linkSecrets(subLink).toTypedArray())
-        val base = Api.base(subLink)
+        val link = subLink.trim()
+        AppLog.secret(*AppLog.linkSecrets(link).toTypedArray())
+        val base = Api.base(link)
         val username = given.trim().ifEmpty {
             try {
-                Api.subscriptionAccount(subLink, userAgent)
+                Api.subscriptionAccount(link, userAgent)
             } catch (e: ApiException) {
                 AppLog.w("app", "sign-in failed: ${e.code}")
                 throw e
             }
+        }.trim()
+        val id = AccountSessions.idFor(link, username)
+        val existing = accountMutex.withLock { accountRecords.any { it.id == id && it.token.isNotEmpty() } }
+        if (existing) {
+            switchAccount(id)
+            return@withContext
         }
+
         AppLog.i("app", "signing in as $username on ${runCatching { URI(base).host }.getOrNull()}")
         val info = device()
         val token = try {
-            Api.login(base, username.trim(), info, userAgent)
+            Api.login(base, username, info, userAgent)
         } catch (e: ApiException) {
             AppLog.w("app", "sign-in failed: ${e.code}")
             throw e
         }
         AppLog.secret(token)
-        val fetched = Api.profile(base, token, info.deviceId, userAgent)
+        val fetched = try {
+            Api.profile(base, token, info.deviceId, userAgent)
+        } catch (e: Exception) {
+            runCatching { Api.logout(base, token, info.deviceId, userAgent) }
+            throw e
+        }
         AppLog.i("app", "signed in: ${summary(fetched)}")
+        if (activeAccountId.value != null && activeAccountId.value != id) {
+            try {
+                disconnectForAccountChange()
+            } catch (e: Exception) {
+                runCatching { Api.logout(base, token, info.deviceId, userAgent) }
+                throw e
+            }
+            updateSettings { it.copy(locationId = null, recents = emptyList()) }
+        }
         val now = System.currentTimeMillis()
-        prefs.edit().putString("subLink", subLink.trim()).putString("username", username.trim()).putString("token", token).putString("profile", fetched.raw).putLong("fetchedAt", now).apply()
-        profile.value = fetched
-        fetchedAt.value = now
-        signOutReason.value = ""
-        signedIn.value = true
+        accountMutex.withLock {
+            accountRecords.removeAll { it.id == id }
+            accountRecords += SavedAccount(id, link, username, token, fetched.raw, now)
+            activeAccountId.value = id
+            persistAccounts()
+            profile.value = fetched
+            fetchedAt.value = now
+            clearPings()
+            signOutReason.value = ""
+            addingAccount.value = false
+            signedIn.value = true
+        }
+    }
+
+    private suspend fun disconnectForAccountChange() {
+        if (VpnState.status.value.state == ConnState.Disconnected) return
+        AppLog.i("app", "disconnecting before changing accounts")
+        DcVpnService.disconnect(app)
+        val disconnected = withTimeoutOrNull(20_000) {
+            VpnState.status.first { it.state == ConnState.Disconnected }
+            true
+        } ?: false
+        if (!disconnected) throw ApiException("connection_lost")
+    }
+
+    suspend fun switchAccount(accountId: String): Profile? = withContext(Dispatchers.IO) {
+        val target = accountMutex.withLock { accountRecords.firstOrNull { it.id == accountId } }
+            ?: throw ApiException("bad_session", 401)
+        if (activeAccountId.value != accountId) {
+            disconnectForAccountChange()
+            accountMutex.withLock {
+                val stillSaved = accountRecords.firstOrNull { it.id == accountId }
+                    ?: throw ApiException("bad_session", 401)
+                activeAccountId.value = stillSaved.id
+                profile.value = stillSaved.profile?.let { runCatching { Profile.parse(it) }.getOrNull() }
+                fetchedAt.value = stillSaved.fetchedAt
+                signedIn.value = stillSaved.token.isNotEmpty() && profile.value != null
+                signOutReason.value = ""
+                addingAccount.value = false
+                clearPings()
+                updateSettings { it.copy(locationId = null, recents = emptyList()) }
+                persistAccounts()
+                AppLog.i("app", "switched to account ${stillSaved.username}")
+            }
+        } else {
+            signedIn.value = target.token.isNotEmpty()
+        }
+        refresh()
+        profile.value
     }
 
     private val sessionEnding = setOf("bad_session", "app_disabled", "not_found")
 
-    // Null when the profile came from the panel; otherwise the error, with the last profile kept.
+    // Keep each account's cache separate; a slow reply from the previous account never replaces the current one.
     suspend fun refresh(): String? = withContext(Dispatchers.IO) {
-        val subLink = prefs.getString("subLink", null)
-        val token = prefs.getString("token", null)
-        if (subLink == null || token == null) return@withContext "bad_session"
+        val session = accountMutex.withLock { activeAccount() } ?: return@withContext "bad_session"
         try {
-            val fetched = Api.profile(Api.base(subLink), token, deviceId(), userAgent)
+            val fetched = Api.profile(Api.base(session.subLink), session.token, deviceId(), userAgent)
             val now = System.currentTimeMillis()
-            prefs.edit().putString("profile", fetched.raw).putLong("fetchedAt", now).apply()
-            profile.value = fetched
-            fetchedAt.value = now
+            accountMutex.withLock {
+                val index = accountRecords.indexOfFirst { it.id == session.id }
+                if (index >= 0) {
+                    accountRecords[index] = accountRecords[index].copy(profile = fetched.raw, fetchedAt = now)
+                    persistAccounts()
+                }
+                if (activeAccountId.value == session.id) {
+                    profile.value = fetched
+                    fetchedAt.value = now
+                    signedIn.value = true
+                }
+            }
             null
         } catch (e: ApiException) {
             AppLog.w("app", "profile refresh failed: ${e.code}")
-            if (e.code in sessionEnding) signOut(e.code)
+            if (e.code in sessionEnding) forgetSession(session.id, e.code)
             e.code
+        }
+    }
+
+    private suspend fun forgetSession(id: String, reason: String) {
+        accountMutex.withLock {
+            val wasActive = activeAccountId.value == id
+            accountRecords.removeAll { it.id == id }
+            if (wasActive) {
+                activeAccountId.value = accountRecords.firstOrNull()?.id
+                val fallback = activeAccount()
+                profile.value = fallback?.profile?.let { runCatching { Profile.parse(it) }.getOrNull() }
+                fetchedAt.value = fallback?.fetchedAt ?: 0L
+                signedIn.value = fallback?.token?.isNotEmpty() == true && profile.value != null
+                signOutReason.value = if (signedIn.value) "" else reason
+                clearPings()
+                updateSettings { it.copy(locationId = null, recents = emptyList()) }
+            }
+            persistAccounts()
         }
     }
 
@@ -214,15 +365,13 @@ object Repo {
         fileTail("tunnel.log", 100_000).takeIf { it.isNotBlank() }?.let { parts += listOf("=== tunnel ===", it) }
         logcat().takeIf { it.isNotBlank() }?.let { parts += listOf("=== logcat ===", AppLog.tail(it, 200_000)) }
         AppLog.previousRun().takeIf { it.isNotBlank() }?.let { parts += listOf("=== previous run (end) ===", it) }
-        val token = prefs.getString("token", null)
-        return AppLog.redact(parts.joinToString("\n"), listOfNotNull(token) + AppLog.linkSecrets(lastSubLink()).filter { it.isNotEmpty() })
+        val secrets = accountRecords.flatMap { account -> listOf(account.token) + AppLog.linkSecrets(account.subLink) }
+        return AppLog.redact(parts.joinToString("\n"), secrets)
     }
 
     // Null on success with the report's number in reportId; otherwise the error code.
     suspend fun sendReport(message: String): Pair<String?, String?> = withContext(Dispatchers.IO) {
-        val subLink = prefs.getString("subLink", null)
-        val token = prefs.getString("token", null)
-        if (subLink == null || token == null) return@withContext null to "bad_session"
+        val account = accountMutex.withLock { activeAccount() } ?: return@withContext null to "bad_session"
         AppLog.i("app", "sending a support report")
         val info = device()
         val body = JSONObject()
@@ -234,7 +383,7 @@ object Repo {
             .put("osVersion", info.osVersion)
             .put("appVersion", info.appVersion)
         try {
-            val id = Api.report(Api.base(subLink), token, info.deviceId, userAgent, body)
+            val id = Api.report(Api.base(account.subLink), account.token, info.deviceId, userAgent, body)
             AppLog.i("app", "support report sent${id?.let { " (number $it)" } ?: ""}")
             id to null
         } catch (e: ApiException) {
@@ -243,36 +392,51 @@ object Repo {
         }
     }
 
-    private fun signOut(reason: String) {
-        prefs.edit().remove("token").remove("profile").apply()
-        profile.value = null
-        signedIn.value = false
-        signOutReason.value = reason
-    }
-
     suspend fun logout() = withContext(Dispatchers.IO) {
-        val subLink = prefs.getString("subLink", null)
-        val token = prefs.getString("token", null)
-        if (subLink != null && token != null) runCatching { Api.logout(Api.base(subLink), token, deviceId(), userAgent) }
-        signOut("")
+        val target = accountMutex.withLock { activeAccount() } ?: run {
+            addingAccount.value = false
+            profile.value = null
+            signedIn.value = false
+            return@withContext
+        }
+        disconnectForAccountChange()
+        runCatching { Api.logout(Api.base(target.subLink), target.token, deviceId(), userAgent) }
+        accountMutex.withLock {
+            accountRecords.removeAll { it.id == target.id }
+            if (activeAccountId.value == target.id) {
+                activeAccountId.value = accountRecords.firstOrNull()?.id
+                val fallback = activeAccount()
+                profile.value = fallback?.profile?.let { runCatching { Profile.parse(it) }.getOrNull() }
+                fetchedAt.value = fallback?.fetchedAt ?: 0L
+                signedIn.value = fallback?.token?.isNotEmpty() == true && profile.value != null
+                signOutReason.value = ""
+                clearPings()
+                updateSettings { it.copy(locationId = null, recents = emptyList()) }
+            }
+            addingAccount.value = false
+            pendingSignIn.value = null
+            persistAccounts()
+        }
+        if (signedIn.value) refresh()
     }
 
     // Tells the panel this device left a connection (Api.disconnected); best effort, on the caller's thread.
     fun tellPanelLeft(protocol: String, locationId: Int?, address: String?) {
-        val subLink = prefs.getString("subLink", null) ?: return
-        val token = prefs.getString("token", null) ?: return
-        runCatching { Api.disconnected(Api.base(subLink), token, deviceId(), userAgent, protocol, locationId, address) }
+        val account = activeAccount() ?: return
+        runCatching { Api.disconnected(Api.base(account.subLink), account.token, deviceId(), userAgent, protocol, locationId, address) }
             .onFailure { AppLog.w("DcRepo", "telling the panel this device left failed: $it") }
     }
 
-    fun lastSubLink(): String = prefs.getString("subLink", "") ?: ""
-    fun lastUsername(): String = prefs.getString("username", "") ?: ""
+    fun lastSubLink(): String = activeAccount()?.subLink.orEmpty()
+    fun lastUsername(): String = activeAccount()?.username.orEmpty()
 
-    suspend fun ping() {
-        val p = profile.value ?: return
+    suspend fun ping() = pingMutex.withLock {
+        val accountId = activeAccountId.value ?: return@withLock
+        val p = profile.value ?: return@withLock
         pinging.value = true
         try {
-            pings.value = Ping.all(p)
+            val result = Ping.all(p, settings.value)
+            if (activeAccountId.value == accountId) pings.value = result
         } finally {
             pinging.value = false
         }

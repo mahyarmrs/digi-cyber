@@ -30,7 +30,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -48,7 +47,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.launch
 import com.digicyber.client.R
 import com.digicyber.client.data.Repo
 import com.digicyber.client.data.noticeLog
@@ -58,6 +56,7 @@ import com.digicyber.client.data.unreadNotices
 fun DcRoot(activity: MainActivity) {
     val settings by Repo.settings.collectAsState()
     val signedIn by Repo.signedIn.collectAsState()
+    val addingAccount by Repo.addingAccount.collectAsState()
     val dark = when (settings.theme) {
         "light" -> false
         "system" -> isSystemInDarkTheme()
@@ -68,23 +67,23 @@ fun DcRoot(activity: MainActivity) {
     DcTheme(dark) {
         CompositionLocalProvider(LocalT provides t, LocalLayoutDirection provides if (t.rtl) LayoutDirection.Rtl else LayoutDirection.Ltr) {
             Surface(Modifier.fillMaxSize(), color = LocalDc.current.background) {
-                if (signedIn) MainScreen(activity) else SignedOutScreen()
-                if (signedIn) SwitchAccount(activity)
+                if (signedIn && !addingAccount) MainScreen(activity) else SignedOutScreen(addingAccount)
+                if (signedIn && !addingAccount) SwitchAccount()
             }
         }
     }
 }
 
-// A digicyber:// link opened while signed in: the same subscription, nothing to do; another one, ask first.
+// A digicyber:// link opened while signed in: the same account needs no action; another one can be added and saved.
 @Composable
-private fun SwitchAccount(activity: MainActivity) {
+private fun SwitchAccount() {
     val t = LocalT.current
     val c = LocalDc.current
-    val scope = rememberCoroutineScope()
     val pending by Repo.pendingSignIn.collectAsState()
     val code = pending ?: return
     val current = Repo.lastUsername()
-    if (code.subLink.trim() == Repo.lastSubLink().trim()) {
+    val sameAccount = code.subLink.trim() == Repo.lastSubLink().trim() && (code.username.isBlank() || code.username.trim() == current)
+    if (sameAccount) {
         LaunchedEffect(code) { Repo.pendingSignIn.value = null }
         return
     }
@@ -94,11 +93,9 @@ private fun SwitchAccount(activity: MainActivity) {
         title = { Text(t("switchAccountTitle"), color = c.text) },
         text = { Text(t("switchAccountText", "user" to iso(current)), color = c.muted) },
         confirmButton = {
-            TextButton(onClick = {
-                activity.disconnect()
-                // Signed out, the sign-in screen takes the waiting code and signs in with it.
-                scope.launch { Repo.logout() }
-            }) { Text(t("switch"), color = c.accent, fontWeight = FontWeight.Bold) }
+            TextButton(onClick = { Repo.addingAccount.value = true }) {
+                Text(t("addAccount"), color = c.accent, fontWeight = FontWeight.Bold)
+            }
         },
         dismissButton = { TextButton(onClick = { Repo.pendingSignIn.value = null }) { Text(t("cancel"), color = c.text) } },
     )
@@ -128,7 +125,7 @@ private fun MainScreen(activity: MainActivity) {
                 when (tab) {
                     "locations" -> LocationsScreen(p, settings, activity, focusSearch = false, asTab = true) { tab = "home" }
                     "protection" -> ProtectionPage(settings) { overlay = "apps" }
-                    "account" -> AccountPage(p, settings, activity)
+                    "account" -> AccountPage(p, settings)
                     else -> HomePage(
                         p,
                         settings,

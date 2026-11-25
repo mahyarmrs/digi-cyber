@@ -181,13 +181,16 @@ private fun NoticeCard(n: NoticeEntry) {
 
 // The account tab: who is signed in, the plan, the app's look and signing out.
 @Composable
-fun AccountPage(p: Profile, settings: Settings, activity: MainActivity) {
+fun AccountPage(p: Profile, settings: Settings) {
     val t = LocalT.current
     val c = LocalDc.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val fetchedAt by Repo.fetchedAt.collectAsState()
+    val accounts by Repo.accounts.collectAsState()
     var refreshing by remember { mutableStateOf(false) }
+    var switchingAccount by remember { mutableStateOf<String?>(null) }
+    var accountError by remember { mutableStateOf("") }
     var confirmLogout by remember { mutableStateOf(false) }
     var reporting by remember { mutableStateOf(false) }
     val a = p.account
@@ -216,6 +219,44 @@ fun AccountPage(p: Profile, settings: Settings, activity: MainActivity) {
             if (a.deviceLimit > 0) InfoLine(t("devices"), iso("${a.devices} / ${a.deviceLimit}"))
         }
         DcCard(padding = 14.dp) {
+            SectionHeader(t("accounts"), t("addAccount")) { Repo.beginAddAccount() }
+            Spacer(Modifier.height(4.dp))
+            for (account in accounts) {
+                Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Ltr { Text(account.username, color = c.text, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        if (account.label.isNotEmpty()) Ltr { Text(account.label, color = c.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    if (account.active) {
+                        StatusPill(t("currentAccount"), true)
+                    } else {
+                        TextButton(
+                            enabled = switchingAccount == null,
+                            onClick = {
+                                accountError = ""
+                                switchingAccount = account.id
+                                scope.launch {
+                                    try {
+                                        Repo.switchAccount(account.id)
+                                        Repo.ping()
+                                    } catch (e: com.digicyber.client.data.ApiException) {
+                                        accountError = t.error(e.code)
+                                    } catch (_: Exception) {
+                                        accountError = t.error("unexpected")
+                                    } finally {
+                                        switchingAccount = null
+                                    }
+                                }
+                            },
+                        ) {
+                            Text(if (switchingAccount == account.id) t("switchingAccount") else t("switchToAccount"), color = c.accent, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+            MessageText(accountError, true)
+            HorizontalDivider(color = c.line, modifier = Modifier.padding(vertical = 4.dp))
             NavRow(R.drawable.ic_refresh, t("refreshSub"), t("updatedAgo", "when" to ago(t, fetchedAt)), trailing = {
                 if (refreshing) CircularProgressIndicator(Modifier.size(20.dp), color = c.accent, strokeWidth = 2.dp)
             }) {
@@ -273,8 +314,17 @@ fun AccountPage(p: Profile, settings: Settings, activity: MainActivity) {
             confirmButton = {
                 TextButton(onClick = {
                     confirmLogout = false
-                    activity.disconnect()
-                    scope.launch { Repo.logout() }
+                    scope.launch {
+                        try {
+                            Repo.logout()
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: com.digicyber.client.data.ApiException) {
+                            Toast.makeText(context, t.error(e.code), Toast.LENGTH_SHORT).show()
+                        } catch (_: Exception) {
+                            Toast.makeText(context, t.error("unexpected"), Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }) { Text(t("logout"), color = Palette.bad, fontWeight = FontWeight.Bold) }
             },
             dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text(t("cancel"), color = c.text) } },

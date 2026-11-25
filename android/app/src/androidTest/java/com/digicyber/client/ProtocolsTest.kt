@@ -12,11 +12,15 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import android.net.VpnService
+import org.json.JSONObject
+import com.digicyber.client.core.Core
 import com.digicyber.client.data.ConnState
+import com.digicyber.client.data.Config
 import com.digicyber.client.data.Repo
 import com.digicyber.client.data.Status
 import com.digicyber.client.ui.MainActivity
 import com.digicyber.client.vpn.DcVpnService
+import com.digicyber.client.vpn.Ping
 import com.digicyber.client.vpn.VpnState
 
 // Every protocol the app runs through Xray, end to end on a real Android: sign in to the test panel
@@ -69,6 +73,17 @@ class ProtocolsTest {
                 }
                 val status = VpnState.status.value
                 if (status.state != ConnState.Connected || status.protocol != protocol) failures += "$protocol (location $locationId): $trail"
+                if (locationId == 1 && status.state == ConnState.Connected) {
+                    val localOutbound = JSONObject("{\"protocol\":\"freedom\"}")
+                    val localConfig = Config("vless", "URL test", "vless://local-test", null, localOutbound)
+                    val endpoint = "http://10.0.2.2:2096/connectivity"
+                    val measured = runBlocking { Ping.urlTest(localConfig, Repo.settings.value, "$endpoint/generate_204") }
+                    assertTrue("HTTP 204 URL test succeeds through isolated Xray", measured != null && measured > 0)
+                    assertEquals("the live connection remains up during URL tests", ConnState.Connected, VpnState.status.value.state)
+                    assertTrue("the live Xray core was not replaced", Core.isRunning())
+                    assertNull("a response other than 204 is not a successful URL test", runBlocking { Ping.urlTest(localConfig, Repo.settings.value, "$endpoint/not-204") })
+                    assertEquals("the live connection remains up after a failed URL test", ConnState.Connected, VpnState.status.value.state)
+                }
                 DcVpnService.disconnect(context)
                 assertTrue("$protocol: disconnect", waitFor(15_000) { VpnState.status.value.state == ConnState.Disconnected })
                 Thread.sleep(1000)

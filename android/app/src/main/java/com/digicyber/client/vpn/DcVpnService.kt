@@ -143,20 +143,6 @@ class DcVpnService : VpnService() {
         }
     }
 
-    // geoip.dat and geosite.dat ship in the APK and are copied once per version.
-    private fun assetDir(): String {
-        val dir = File(filesDir, "xray").apply { mkdirs() }
-        val marker = File(dir, "version")
-        val version = packageManager.getPackageInfo(packageName, 0).lastUpdateTime.toString()
-        if (marker.takeIf { it.exists() }?.readText() != version) {
-            for (name in listOf("geoip.dat", "geosite.dat")) {
-                assets.open(name).use { input -> File(dir, name).outputStream().use { input.copyTo(it) } }
-            }
-            marker.writeText(version)
-        }
-        return dir.absolutePath
-    }
-
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
     // The config works only if an empty page comes back through it.
@@ -189,7 +175,7 @@ class DcVpnService : VpnService() {
         }
         set(Status(ConnState.Connecting, locationId))
         val dns = XrayConfig.dnsServers(settings.dns)
-        Core.setAssetDir(assetDir())
+        Core.setAssetDir(XrayAssets.ensure(this))
         for ((i, config) in list.withIndex()) {
             if (!scope.isActive) return
             set(Status(ConnState.Connecting, locationId, config.locationId, config.name, config.protocol))

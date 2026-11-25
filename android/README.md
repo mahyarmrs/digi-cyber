@@ -1,14 +1,14 @@
 # Digi Cyber for Android
 
-Android 5.0 and later, on every processor family (arm64-v8a, armeabi-v7a, x86_64, x86). Native Kotlin with Jetpack Compose, the same sign-in, profile, notices, refresh and ping as the desktop app.
+Android 5.0 and later, on every processor family (arm64-v8a, armeabi-v7a, x86_64, x86). Native Kotlin with Jetpack Compose, the same sign-in, profile, notices, refresh and account switching as the desktop app. Xray and WireGuard location tests request the desktop's HTTP 204 URL through an isolated Xray instance, without replacing a live VPN.
 
 ## Screens
 
 - **Sign in**: the Digi Cyber mark on the logo's gradient, and one field: the subscription link (paste button), *Sign in*, *Scan QR*, *QR picture* and where the sign-in details are. The link alone signs in: the app reads the account's name from the subscription's summary (`?format=info`).
 - **Home**: the wordmark with refresh and the notices bell, warning and critical notices as strips, the hero card (state and timer, the location with its flag, protocol and ping, and the one button: *Secure my connection* / *Disconnect*; the logo's gradient once protected), quick picks (recent or quickest locations), the plan (traffic bar, days and traffic left, devices), *Secured by VPN* (hours connected on each day of this week, kept on the phone only) and the connection tools.
-- **Locations** (a tab): every location grouped by country with its flag and ping, countries with several cities opening to list them, a protocol filter and *Test ping*.
+- **Locations** (a tab): every location grouped by country with its flag and ping, countries with several cities opening to list them, a protocol filter and *Test ping* (HTTP 204 through Xray/WireGuard; Android's app-excluded OpenVPN endpoints retain TCP/ICMP checks).
 - **Protection** (a tab): protocol, Iranian sites without VPN, ad blocking, kill switch (Android's own), apps without VPN, DNS.
-- **Account** (a tab): plan, refresh, language, dark or light, report a problem, sign out. **Notices** open from the bell: the panel's notices, always right to left in Estedad.
+- **Account** (a tab): plan, refresh, a saved-account list with switching and *Add account*, language, dark or light, report a problem, and sign out of the active account. **Notices** open from the bell: the panel's notices, always right to left in Estedad.
 
 Midnight blue with the logo's cyan-to-violet gradient; dark by default, light or the system's on request; Persian and English in Estedad (`res/font`, static instances of the variable font).
 
@@ -20,12 +20,13 @@ How it connects: Xray-core runs the panel's outbound behind a SOCKS port on 127.
 
 ## Tests
 
-`gradle -p android testReleaseUnitTest` runs the JVM tests (sign-in links, this week's bars, both languages complete). On an Android 11 emulator CI then runs:
+`gradle -p android testReleaseUnitTest` runs the JVM tests (sign-in links, this week's bars, both languages complete, and saved-account IDs, migration and storage). On an Android 11 emulator CI then runs:
 
 - `EnginesTest`: the native libraries load, Xray runs the app's configuration.
 - `OpenVpnTest`: the app connects through OpenVPN servers set up as Manifold sets them up, over TCP and UDP.
-- `ProtocolsTest`: the app signs in to a test panel (`test/mock-panel.mjs`) and connects through VLESS + REALITY + Vision, VMess over WebSocket, Trojan, Shadowsocks 2022 and WireGuard on the kernel (`test/protocol-servers.sh`).
-- `UiTourTest`: the sign-in page, signing in by opening a sign-in link with the subscription link alone, every tab, the notices, the location list, connecting, English and light; each screen is kept as the `android-screens` artifact.
+- `ProtocolsTest`: the app signs in to a test panel (`test/mock-panel.mjs`) and connects through VLESS + REALITY + Vision, VMess over WebSocket, Trojan, Shadowsocks 2022 and WireGuard on the kernel (`test/protocol-servers.sh`). It checks the HTTP 204 URL probe against the local test endpoint while another Xray VPN instance is live.
+- `AccountsTest`: adds two test-panel accounts, switches between them, and confirms signing out removes only the active account.
+- `UiTourTest`: the sign-in page, signing in by opening a sign-in link with the subscription link alone, every tab, saved-account and add-account UI, the notices, the location list, connecting, English and light; each screen is kept as the `android-screens` artifact.
 
 ## Build
 
