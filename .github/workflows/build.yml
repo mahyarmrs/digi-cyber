@@ -467,6 +467,30 @@ jobs:
             sleep 6
             adb exec-out screencap -p > android-welcome.png
             adb shell pidof com.digicyber.client
+      - name: Summarize Android test failures
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          found = False
+          for path in glob.glob('android/app/build/outputs/androidTest-results/**/*.xml', recursive=True):
+              try:
+                  root = ET.parse(path).getroot()
+              except (ET.ParseError, OSError):
+                  continue
+              for case in root.iter('testcase'):
+                  for failure in (*case.findall('failure'), *case.findall('error')):
+                      found = True
+                      detail = ' '.join(filter(None, [failure.get('message', ''), failure.text or '']))
+                      detail = ' '.join(detail.split())[:6000]
+                      detail = detail.replace('%', '%25').replace('\\r', '%0D').replace('\\n', '%0A')
+                      title = f"{case.get('classname', 'Android test')}#{case.get('name', 'failure')}"
+                      print(f'::error title=Android test failure::{title}: {detail}')
+          if not found:
+              print('::error title=Android test failure::No JUnit failure details were found in the Android test results.')
+          PY
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
